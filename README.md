@@ -30,7 +30,7 @@ the CLI can never drift apart.
 - **Full-text** — fetch and clean the complete article when a feed ships only a summary.
 - **AI** — summaries, ask-the-article Q&A, and digests. Bring your own API key.
 - **Audio** — a built-in player that follows you from article to article.
-- **FreshRSS sync** — keep read state in step with a FreshRSS server.
+- **FreshRSS sync** — keep read state, subscriptions and folders in step with a FreshRSS or Miniflux server.
 - **Local-first** — everything stays on your machine. No account, no cloud.
 - **Localized** — English, Japanese, and Simplified Chinese.
 

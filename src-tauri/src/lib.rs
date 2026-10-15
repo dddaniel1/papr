@@ -11,6 +11,8 @@ pub use papr_core::{ai, db, error, extraction, ingestion, models, opml, sanitize
 mod backing;
 mod commands;
 mod notify;
+#[cfg(target_os = "linux")]
+mod page_overlay;
 mod page_view;
 // The tauri-coupled refresh scheduler (progress channels, AppHandle) — built on
 // top of `papr_core::ingestion`. Was `ingestion::scheduler` before the split.
@@ -202,6 +204,16 @@ pub fn run() {
                 }
             }
 
+            // ── Linux: overlay container for the in-app original-page view ──
+            // Tauri parents child webviews to the window's GtkBox on Linux, so
+            // they stack instead of floating. Restructure the window content
+            // into a GtkFixed once, up front, so `page_view` can overlay the
+            // reader (page_overlay.rs). No-op after the first run.
+            #[cfg(target_os = "linux")]
+            if let Some(win) = app.get_webview_window("main") {
+                page_overlay::install(&win);
+            }
+
             // ── Menu-bar tray (keeps the app resident for refreshes) ──
             tray::build(app.handle(), &lang, unread, latest_fetch.as_deref())?;
 
@@ -288,6 +300,7 @@ pub fn run() {
             commands::vacuum_db,
             commands::reset_settings,
             commands::clear_all_data,
+            commands::clear_articles,
             commands::apply_network_settings,
             commands::freshrss_connect,
             commands::freshrss_disconnect,

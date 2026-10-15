@@ -73,7 +73,7 @@ the exact command to re-run:
 
 ```sh
 papr unsubscribe <id> --yes            # delete a feed and its articles
-papr admin cleanup <days> --yes        # also: admin vacuum / admin reset
+papr admin cleanup <days> --yes        # also: admin clear-articles / admin clear-feeds / admin vacuum / admin reset
 papr folder delete <id> --yes          # likewise tag/rule/highlight delete, newsletter remove
 ```
 

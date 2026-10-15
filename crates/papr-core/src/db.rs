@@ -305,6 +305,38 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // databases remain readable without resetting or discarding data.
         M::up("ALTER TABLE feeds ADD COLUMN custom_favicon INTEGER NOT NULL DEFAULT 0;"),
         M::up("ALTER TABLE feeds ADD COLUMN position INTEGER NOT NULL DEFAULT 0;"),
+        // v22 — pending feed-/folder-level operations for the sync server.
+        // `sync_queue` (v3) carries per-article read/starred edits, whose
+        // desired state is still readable from the `articles` row if a push
+        // fails. Feed- and folder-level changes are different: an unsubscribe
+        // or folder delete removes the very row that described it, so if the
+        // push is lost the intent is unrecoverable and the next pull would
+        // silently re-create the feed/folder. This table records those ops
+        // explicitly and the next sync drains them (retrying on failure).
+        // `kind` is one of 'unsubscribe' | 'rename_folder' | 'delete_folder' |
+        // 'mark_all_read'; `target` is the feed URL, folder name or stream id;
+        // `value` carries the new folder name (rename) or the mark-read
+        // timestamp. UNIQUE(kind, target) coalesces a repeated edit.
+        M::up(
+            r#"
+            CREATE TABLE sync_ops (
+                id         INTEGER PRIMARY KEY,
+                kind       TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                value      TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(kind, target)
+            );
+            "#,
+        ),
+        // v23 — server-authoritative unread counts. When a sync server is
+        // linked it is the source of truth for how many items are unread, so
+        // its `unread-count` is cached here and the sidebar/badge show it in
+        // place of the locally-derived count (which drifts: the server may hold
+        // unread items Papr never fetched). NULL means "no server count for
+        // this feed" — a local-only feed, or sync not linked — and the count
+        // falls back to `COUNT(articles WHERE is_read = 0)`.
+        M::up("ALTER TABLE feeds ADD COLUMN server_unread INTEGER;"),
     ])
 });
 
@@ -451,12 +483,34 @@ pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
     if clash.is_some() {
         return Err(AppError::code("folderNameExists"));
     }
+    // Capture the old name before the update: a linked server files feeds by
+    // label name, so a rename must be pushed as a `rename-tag` or the server
+    // keeps the stale label and a later pull resurrects it here.
+    let old: Option<String> = conn
+        .query_row("SELECT name FROM folders WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?;
     conn.execute("UPDATE folders SET name = ?2 WHERE id = ?1", params![id, name])?;
+    if let Some(old) = old {
+        if old != name && is_freshrss_connected(conn) {
+            enqueue_op(conn, OP_RENAME_FOLDER, &old, Some(name))?;
+        }
+    }
     Ok(())
 }
 
 pub fn delete_folder(conn: &Connection, id: i64) -> AppResult<()> {
+    // Capture the name before the row disappears so a linked server can be
+    // told to drop the matching label — otherwise the next pull re-creates the
+    // folder from the server's `tag/list`.
+    let name: Option<String> = conn
+        .query_row("SELECT name FROM folders WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?;
     conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
+    if let Some(name) = name {
+        if is_freshrss_connected(conn) {
+            enqueue_op(conn, OP_DELETE_FOLDER, &name, None)?;
+        }
+    }
     Ok(())
 }
 
@@ -521,7 +575,8 @@ pub fn list_feeds(conn: &Connection) -> AppResult<Vec<Feed>> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.feed_url, f.site_url, f.title, f.description, f.favicon_url,
                 f.folder_id, f.source_type, f.last_fetched_at, f.fetch_error,
-                (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0),
+                COALESCE(f.server_unread,
+                         (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0)),
                 f.refresh_interval_min, f.auto_translate, f.open_mode
          FROM feeds f ORDER BY f.title COLLATE NOCASE",
     )?;
@@ -744,7 +799,24 @@ pub fn set_feed_error(conn: &Connection, id: i64, error: &str) -> AppResult<()> 
 }
 
 pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
+    // Capture the URL and source type before the row is gone: a synced delete
+    // must be pushed as `unsubscribe`, or the very next pull sees the feed
+    // still on the server and re-subscribes it locally, undoing the delete.
+    // Newsletter sources have a synthetic `imap://` URL that no feed server
+    // subscribes to, so they are never pushed (matching `feeds_for_sync`).
+    let meta: Option<(String, String)> = conn
+        .query_row(
+            "SELECT feed_url, source_type FROM feeds WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
     conn.execute("DELETE FROM feeds WHERE id = ?1", params![id])?;
+    if let Some((url, source_type)) = meta {
+        if source_type != "newsletter" && !url.trim().is_empty() && is_freshrss_connected(conn) {
+            enqueue_op(conn, OP_UNSUBSCRIBE, &url, None)?;
+        }
+    }
     Ok(())
 }
 
@@ -767,15 +839,32 @@ pub fn feeds_for_export(conn: &Connection) -> AppResult<Vec<(String, String, Opt
     Ok(rows)
 }
 
-/// Feed URLs the sync layer should mirror onto the server. Excludes
-/// `newsletter` sources (those have no upstream feed URL the server could
-/// subscribe to), matching the OPML-export filter.
-pub fn feed_urls_for_sync(conn: &Connection) -> AppResult<Vec<String>> {
+/// Feeds the sync layer should mirror onto the server, with the metadata a push
+/// needs: the local title (and whether the user set it by hand) and the folder
+/// name, if any. Excludes `newsletter` sources (those have no upstream feed URL
+/// the server could subscribe to), matching the OPML-export filter.
+pub struct SyncFeed {
+    pub url: String,
+    pub title: String,
+    pub custom_title: bool,
+    pub folder: Option<String>,
+}
+
+pub fn feeds_for_sync(conn: &Connection) -> AppResult<Vec<SyncFeed>> {
     let mut stmt = conn.prepare(
-        "SELECT feed_url FROM feeds WHERE source_type != 'newsletter' AND feed_url <> ''",
+        "SELECT f.feed_url, f.title, f.custom_title, fo.name
+         FROM feeds f LEFT JOIN folders fo ON fo.id = f.folder_id
+         WHERE f.source_type != 'newsletter' AND f.feed_url <> ''",
     )?;
     let rows = stmt
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| {
+            Ok(SyncFeed {
+                url: r.get(0)?,
+                title: r.get(1)?,
+                custom_title: r.get::<_, i64>(2)? != 0,
+                folder: r.get(3)?,
+            })
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -1495,7 +1584,28 @@ pub fn article_text(conn: &Connection, id: i64) -> AppResult<(String, String)> {
 }
 
 pub fn set_read(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
+    // A user-driven read/unread toggle should also nudge the feed's cached
+    // *server* count, otherwise a server-authoritative badge wouldn't move until
+    // the next sync. Skipped when the feed has no cached count (no server
+    // linked), and always overwritten by the next pull.
+    let row: Option<(i64, bool)> = conn
+        .query_row(
+            "SELECT feed_id, is_read FROM articles WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?;
     conn.execute("UPDATE articles SET is_read = ?2 WHERE id = ?1", params![id, read])?;
+    if let Some((feed_id, was_read)) = row {
+        if was_read != read {
+            let delta = if read { -1 } else { 1 };
+            conn.execute(
+                "UPDATE feeds SET server_unread = MAX(0, server_unread + ?2)
+                 WHERE id = ?1 AND server_unread IS NOT NULL",
+                params![feed_id, delta],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1642,6 +1752,45 @@ pub fn mark_all_read(
             ),
             bind.as_slice(),
         )?;
+        // Also tell the server to mark the mirroring stream read. The
+        // per-article queue above only reaches items that already carry a
+        // `remote_id`; this stream op covers the long tail the server has but
+        // Papr never matched by URL. `ts` is a far-future stamp so the server
+        // marks the whole stream, not just items older than "now".
+        if let Some(stream) = sync_stream_for_query(conn, query)? {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+                .to_string();
+            enqueue_op(&tx, OP_MARK_ALL_READ, &stream, Some(&ts))?;
+        }
+        // Server-authoritative badge: a whole-stream scope leaves the affected
+        // feeds fully read, so zero their cached server count to drop the
+        // sidebar immediately (the next pull re-confirms it). A partial scope
+        // (starred / read-later / tag) is left to the pull.
+        match query {
+            ArticleQuery::All | ArticleQuery::Unread => {
+                tx.execute(
+                    "UPDATE feeds SET server_unread = 0 WHERE server_unread IS NOT NULL",
+                    [],
+                )?;
+            }
+            ArticleQuery::Feed(id) => {
+                tx.execute(
+                    "UPDATE feeds SET server_unread = 0 WHERE id = ?1 AND server_unread IS NOT NULL",
+                    params![id],
+                )?;
+            }
+            ArticleQuery::Folder(id) => {
+                tx.execute(
+                    "UPDATE feeds SET server_unread = 0
+                     WHERE folder_id = ?1 AND server_unread IS NOT NULL",
+                    params![id],
+                )?;
+            }
+            ArticleQuery::Starred | ArticleQuery::ReadLater | ArticleQuery::Tag(_) => {}
+        }
     }
     let n = tx.execute(
         &format!("UPDATE articles SET is_read = 1 WHERE {pred} AND is_read = 0"),
@@ -2036,8 +2185,12 @@ pub fn apply_rule_to_existing(
 /// (total unread, starred, read-later) counts for the sidebar smart folders.
 pub fn smart_counts(conn: &Connection) -> AppResult<(i64, i64, i64)> {
     Ok(conn.query_row(
+        // Unread sums the per-feed counts (server-authoritative where a server
+        // is linked — see `count_unread`); starred / read-later stay local.
         "SELECT
-            (SELECT COUNT(*) FROM articles WHERE is_read = 0),
+            (SELECT COALESCE(SUM(COALESCE(f.server_unread,
+                        (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0))), 0)
+             FROM feeds f),
             (SELECT COUNT(*) FROM articles WHERE is_starred = 1),
             (SELECT COUNT(*) FROM articles WHERE read_later = 1)",
         [],
@@ -2298,6 +2451,49 @@ pub fn vacuum(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+/// Delete every stored article while keeping subscriptions, folders, tags and
+/// rules. Dependent rows cascade with the article (enclosures, highlights,
+/// article tags, preview translations, queued article state); the feed's
+/// tombstones are left alone. No tombstone is written, so refreshing a feed
+/// re-imports the items it still publishes. Returns the number of articles
+/// removed.
+pub fn clear_articles(conn: &Connection) -> AppResult<usize> {
+    Ok(conn.execute("DELETE FROM articles", [])?)
+}
+
+/// Delete every subscription (feed) and folder, keeping tags and settings.
+/// Each feed's articles, newsletter source, per-feed rules, queued article
+/// state and tombstones cascade away. Folders go too — a surviving feed would
+/// be unfiled anyway (`feeds.folder_id` is `ON DELETE SET NULL`). When a
+/// GReader server is linked, every RSS feed is queued as an unsubscribe first:
+/// the next sync would otherwise pull the server's subscription list and
+/// re-subscribe the feeds locally, undoing the clear — the same reason
+/// `delete_feed` queues one. Returns the number of feeds removed.
+pub fn clear_subscriptions(conn: &Connection) -> AppResult<usize> {
+    let tx = conn.unchecked_transaction()?;
+    if is_freshrss_connected(conn) {
+        // Collect first so the statement — which borrows `tx` — is dropped
+        // before we enqueue into `sync_ops` through the same transaction.
+        let urls: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT feed_url FROM feeds
+                 WHERE source_type != 'newsletter' AND feed_url <> ''",
+            )?;
+            let urls = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            urls
+        };
+        for url in urls {
+            enqueue_op(&tx, OP_UNSUBSCRIBE, &url, None)?;
+        }
+    }
+    let removed = tx.execute("DELETE FROM feeds", [])?;
+    tx.execute("DELETE FROM folders", [])?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 /// Wipe all user content (feeds → articles cascade, folders). Settings are
 /// kept. Both deletes commit together so a failure can't leave feeds wiped
 /// but folders behind.
@@ -2316,7 +2512,17 @@ pub fn reset_settings(conn: &Connection) -> AppResult<()> {
 }
 
 pub fn count_unread(conn: &Connection) -> AppResult<i64> {
-    Ok(conn.query_row("SELECT COUNT(*) FROM articles WHERE is_read = 0", [], |r| r.get(0))?)
+    // Sum per feed so a linked server's cached count (`server_unread`) is
+    // honoured where present and the total matches the per-feed badges and the
+    // sidebar's folder roll-ups. With no server linked every value is NULL and
+    // this reduces to the plain unread-article count.
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(f.server_unread,
+                    (SELECT COUNT(*) FROM articles a WHERE a.feed_id = f.id AND a.is_read = 0))), 0)
+         FROM feeds f",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Unread article count for a single feed — the same expression `list_feeds`
@@ -2336,6 +2542,122 @@ pub fn latest_fetch(conn: &Connection) -> AppResult<Option<String>> {
     Ok(conn.query_row("SELECT MAX(last_fetched_at) FROM feeds", [], |r| {
         r.get::<_, Option<String>>(0)
     })?)
+}
+
+/// A queued feed-/folder-level operation for the sync server. Distinct from
+/// `SyncEntry` (per-article state), these are changes whose intent cannot be
+/// re-derived from local state once applied — an unsubscribe or a folder delete
+/// has already removed the row — so they live in `sync_ops` until pushed.
+pub const OP_UNSUBSCRIBE: &str = "unsubscribe";
+pub const OP_RENAME_FOLDER: &str = "rename_folder";
+pub const OP_DELETE_FOLDER: &str = "delete_folder";
+pub const OP_MARK_ALL_READ: &str = "mark_all_read";
+
+/// One row of `sync_ops`.
+pub struct SyncOp {
+    pub id: i64,
+    pub kind: String,
+    pub target: String,
+    pub value: Option<String>,
+}
+
+/// Queue a feed-/folder-level operation. Idempotent per `(kind, target)`: a
+/// second edit of the same feed/folder replaces the pending one, so a folder
+/// renamed twice pushes once.
+pub fn enqueue_op(conn: &Connection, kind: &str, target: &str, value: Option<&str>) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO sync_ops(kind, target, value) VALUES (?1, ?2, ?3)
+         ON CONFLICT(kind, target) DO UPDATE SET value = excluded.value",
+        params![kind, target, value],
+    )?;
+    Ok(())
+}
+
+/// Pending ops in the order they were queued.
+pub fn list_ops(conn: &Connection) -> AppResult<Vec<SyncOp>> {
+    let mut stmt = conn.prepare("SELECT id, kind, target, value FROM sync_ops ORDER BY id")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(SyncOp {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                value: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn delete_op(conn: &Connection, id: i64) -> AppResult<()> {
+    conn.execute("DELETE FROM sync_ops WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Targets of pending ops of a given kind. A pull consults this so it doesn't
+/// resurrect a feed/folder whose deletion hasn't reached the server yet.
+pub fn pending_op_targets(conn: &Connection, kind: &str) -> AppResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT target FROM sync_ops WHERE kind = ?1")?;
+    let rows = stmt
+        .query_map(params![kind], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The GReader stream mirroring a Papr bulk-read scope, when one exists.
+/// Papr-specific scopes (read-later, tags) have no server stream, so a bulk
+/// mark-read over them falls back to per-article pushes.
+pub fn sync_stream_for_query(conn: &Connection, query: &ArticleQuery) -> AppResult<Option<String>> {
+    Ok(match query {
+        ArticleQuery::All | ArticleQuery::Unread => {
+            Some("user/-/state/com.google/reading-list".to_string())
+        }
+        ArticleQuery::Starred => Some("user/-/state/com.google/starred".to_string()),
+        ArticleQuery::Feed(id) => conn
+            .query_row("SELECT feed_url FROM feeds WHERE id = ?1", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .filter(|u| !u.trim().is_empty())
+            .map(|u| format!("feed/{u}")),
+        ArticleQuery::Folder(id) => conn
+            .query_row("SELECT name FROM folders WHERE id = ?1", params![id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| format!("user/-/label/{n}")),
+        ArticleQuery::ReadLater | ArticleQuery::Tag(_) => None,
+    })
+}
+
+/// Overwrite the cached per-feed unread counts from the sync server. Every
+/// non-newsletter feed not present in `counts` (a local-only feed the server
+/// doesn't carry, or one it didn't report) has its cache cleared so the sidebar
+/// falls back to the locally-computed count — a stale server number is worse
+/// than none.
+pub fn apply_server_unread(
+    conn: &Connection,
+    counts: &std::collections::HashMap<i64, i64>,
+) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE feeds SET server_unread = NULL WHERE source_type != 'newsletter'", [])?;
+    {
+        let mut stmt = tx.prepare("UPDATE feeds SET server_unread = ?2 WHERE id = ?1")?;
+        for (id, count) in counts {
+            stmt.execute(params![id, count])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Drop every cached server unread count, reverting the sidebar to local
+/// counts. Used when sync is disconnected — without a server there is no
+/// authoritative figure to show.
+pub fn clear_server_unread(conn: &Connection) -> AppResult<()> {
+    conn.execute("UPDATE feeds SET server_unread = NULL", [])?;
+    Ok(())
 }
 
 // ─────────────────────────── sync ───────────────────────────
@@ -2524,28 +2846,28 @@ mod tests {
 
     #[test]
     fn startup_migrations_preserve_existing_databases() {
-        for version in [0, 19, 20, 21, 22] {
+        for version in [0, 19, 20, 21, 22, 23, 24] {
             let path = std::env::temp_dir().join(format!("papr-migrations-{}-{}-{}.db",
                 std::process::id(), version,
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             let mut conn = Connection::open(&path).unwrap();
-            MIGRATIONS.to_version(&mut conn, version.min(21)).unwrap();
+            MIGRATIONS.to_version(&mut conn, version.min(23)).unwrap();
             if version > 0 {
                 conn.execute("INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.com/rss','Preserved')", []).unwrap();
                 conn.execute("INSERT INTO articles(feed_id,guid,title,is_starred) VALUES(1,'one','Article',1)", []).unwrap();
             }
             if version >= 20 { conn.execute("UPDATE feeds SET custom_favicon=1", []).unwrap(); }
             if version >= 21 { conn.execute("UPDATE feeds SET position=42", []).unwrap(); }
-            if version == 22 { conn.pragma_update(None, "user_version", 22).unwrap(); }
+            if version == 24 { conn.pragma_update(None, "user_version", 24).unwrap(); }
             drop(conn);
             let result = open(&path);
-            if version == 22 {
+            if version == 24 {
                 assert!(result.is_err());
                 let conn = Connection::open(&path).unwrap();
-                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 22);
+                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 24);
             } else {
                 let conn = result.unwrap();
-                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 21);
+                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 23);
                 if version > 0 {
                     let values: (String,i64,i64) = conn.query_row("SELECT title,custom_favicon,position FROM feeds WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
                     assert_eq!(values, ("Preserved".into(), i64::from(version>=20), if version>=21 {42} else {0}));
@@ -3527,6 +3849,186 @@ mod tests {
             .query_row("SELECT count(*) FROM sync_queue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(queued, 0);
+        assert!(list_ops(&conn).unwrap().is_empty(), "no op when disconnected");
+    }
+
+    // ── sync_ops queueing (feed- and folder-level changes) ──────────────
+
+    #[test]
+    fn delete_feed_queues_unsubscribe_only_when_connected() {
+        // Disconnected: the delete is purely local, nothing to push.
+        let (conn, _) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        delete_feed(&conn, feed_id).unwrap();
+        assert!(list_ops(&conn).unwrap().is_empty());
+
+        // Connected: the delete is queued so the server drops the feed too —
+        // otherwise the next pull re-subscribes it locally.
+        let (conn, _) = test_db();
+        set_setting(&conn, "freshrss_url", "https://freshrss.example/api/greader.php").unwrap();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        delete_feed(&conn, feed_id).unwrap();
+        let ops = list_ops(&conn).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OP_UNSUBSCRIBE);
+        assert_eq!(ops[0].target, "https://example.com/feed.xml");
+    }
+
+    #[test]
+    fn folder_rename_and_delete_queue_ops_when_connected() {
+        let (conn, _) = test_db();
+        set_setting(&conn, "freshrss_url", "https://freshrss.example/api/greader.php").unwrap();
+        let id = create_folder(&conn, "Tech").unwrap();
+        rename_folder(&conn, id, "Science").unwrap();
+        delete_folder(&conn, id).unwrap();
+        let ops = list_ops(&conn).unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].kind, OP_RENAME_FOLDER);
+        assert_eq!(ops[0].target, "Tech");
+        assert_eq!(ops[0].value.as_deref(), Some("Science"));
+        assert_eq!(ops[1].kind, OP_DELETE_FOLDER);
+        assert_eq!(ops[1].target, "Science");
+    }
+
+    #[test]
+    fn mark_all_read_queues_a_server_stream() {
+        let (conn, _) = test_db();
+        mark_all_read(&conn, &ArticleQuery::All, true).unwrap();
+        let ops = list_ops(&conn).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OP_MARK_ALL_READ);
+        assert_eq!(ops[0].target, "user/-/state/com.google/reading-list");
+        assert!(ops[0].value.as_deref().is_some_and(|v| !v.is_empty()));
+    }
+
+    #[test]
+    fn mark_all_read_scopes_the_stream_to_the_feed() {
+        let (conn, _) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        mark_all_read(&conn, &ArticleQuery::Feed(feed_id), true).unwrap();
+        let ops = list_ops(&conn).unwrap();
+        assert_eq!(ops[0].target, "feed/https://example.com/feed.xml");
+    }
+
+    #[test]
+    fn feed_rename_and_move_ride_on_state_not_the_op_queue() {
+        // rename_feed / move_feed are reconciled declaratively from live state
+        // at sync time, so neither needs a queued op.
+        let (conn, _) = test_db();
+        set_setting(&conn, "freshrss_url", "https://freshrss.example/api/greader.php").unwrap();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        rename_feed(&conn, feed_id, "My Name").unwrap();
+        let fid = create_folder(&conn, "Tech").unwrap();
+        move_feed(&conn, feed_id, Some(fid)).unwrap();
+        assert!(list_ops(&conn).unwrap().is_empty());
+    }
+
+    // ── clear all articles / subscriptions ──────────────────────────────
+
+    #[test]
+    fn clear_articles_keeps_subscriptions_and_writes_no_tombstone() {
+        let (conn, _) = test_db();
+        let folder = create_folder(&conn, "Tech").unwrap();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        move_feed(&conn, feed_id, Some(folder)).unwrap();
+
+        assert_eq!(clear_articles(&conn).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM articles", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        // Subscriptions, folders and tags are untouched.
+        assert_eq!(conn.query_row("SELECT count(*) FROM feeds", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM folders", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        // No tombstone — a refresh re-imports whatever the feed still publishes.
+        let tombstones: i64 = conn
+            .query_row("SELECT count(*) FROM article_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0);
+    }
+
+    #[test]
+    fn clear_subscriptions_removes_feeds_articles_and_folders() {
+        let (conn, _) = test_db();
+        create_folder(&conn, "Tech").unwrap();
+        assert_eq!(clear_subscriptions(&conn).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM feeds", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT count(*) FROM articles", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT count(*) FROM folders", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn clear_subscriptions_queues_unsubscribe_only_when_connected() {
+        // Disconnected: purely local, nothing to push.
+        let (conn, _) = test_db();
+        clear_subscriptions(&conn).unwrap();
+        assert!(list_ops(&conn).unwrap().is_empty());
+
+        // Connected: each RSS feed is queued as an unsubscribe, or the next
+        // pull would re-subscribe it locally.
+        let (conn, _) = test_db();
+        set_setting(&conn, "freshrss_url", "https://freshrss.example/api/greader.php").unwrap();
+        clear_subscriptions(&conn).unwrap();
+        let ops = list_ops(&conn).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].kind, OP_UNSUBSCRIBE);
+        assert_eq!(ops[0].target, "https://example.com/feed.xml");
+    }
+
+    // ── server-authoritative unread counts ──────────────────────────────
+
+    #[test]
+    fn cached_server_unread_overrides_the_local_count() {
+        let (conn, _) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        // One locally-unread article to begin with.
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 1);
+        assert_eq!(count_unread(&conn).unwrap(), 1);
+        // The server reports 7 → badges and the total follow the server.
+        conn.execute("UPDATE feeds SET server_unread = 7 WHERE id = ?1", params![feed_id]).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 7);
+        assert_eq!(count_unread(&conn).unwrap(), 7);
+        assert_eq!(smart_counts(&conn).unwrap().0, 7);
+    }
+
+    #[test]
+    fn apply_server_unread_sets_reported_and_clears_the_rest() {
+        let (conn, _) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        apply_server_unread(&conn, &std::collections::HashMap::from([(feed_id, 3)])).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 3);
+        // An empty pull clears every cache → the local count returns.
+        apply_server_unread(&conn, &std::collections::HashMap::new()).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 1);
+    }
+
+    #[test]
+    fn clear_server_unread_reverts_to_local_counts() {
+        let (conn, _) = test_db();
+        conn.execute("UPDATE feeds SET server_unread = 4", []).unwrap();
+        clear_server_unread(&conn).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 1);
+    }
+
+    #[test]
+    fn set_read_nudges_the_cached_server_count() {
+        let (conn, aid) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        conn.execute("UPDATE feeds SET server_unread = 5 WHERE id = ?1", params![feed_id]).unwrap();
+        set_read(&conn, aid, true).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 4);
+        // A no-op repeat must not double-decrement.
+        set_read(&conn, aid, true).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 4);
+        // Un-reading nudges the count back up.
+        set_read(&conn, aid, false).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 5);
+    }
+
+    #[test]
+    fn mark_all_read_zeroes_the_cached_server_count() {
+        let (conn, _) = test_db();
+        let feed_id: i64 = conn.query_row("SELECT id FROM feeds", [], |r| r.get(0)).unwrap();
+        conn.execute("UPDATE feeds SET server_unread = 9 WHERE id = ?1", params![feed_id]).unwrap();
+        mark_all_read(&conn, &ArticleQuery::Feed(feed_id), true).unwrap();
+        assert_eq!(list_feeds(&conn).unwrap()[0].unread_count, 0);
     }
 
     // ── sync state reconciliation (issue #96) ────────────────────────

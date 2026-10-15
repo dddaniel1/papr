@@ -6,11 +6,12 @@
 //! differs per provider, so the `Provider` enum centralises that mapping.
 //!
 //! Flow: `ClientLogin` for an auth token, push any queued local read/starred
-//! changes via `edit-tag`, pull the subscription list (to subscribe locally to
-//! new server feeds) and push any local-only feeds back to the server (so the
-//! two subscription lists converge rather than drifting), then pull the recent
-//! reading-list (to reconcile read/starred state, matched to local articles by
-//! URL).
+//! changes via `edit-tag`, drain queued feed-/folder-level operations
+//! (`subscription/edit` unsubscribe, `rename-tag`, `disable-tag`,
+//! `mark-all-as-read`), pull the subscription list and the folder (`tag/list`)
+//! list, converge the two subscription lists (subscribe local-only feeds, file
+//! feeds into folders, push hand-set titles), then pull the recent reading-list
+//! (to reconcile read/starred state, matched to local articles by URL).
 
 use crate::db;
 use crate::error::{AppError, AppResult};
@@ -18,6 +19,7 @@ use crate::ingestion::parse;
 use reqwest::{Client, RequestBuilder};
 use rusqlite::Connection;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 
 /// The writer connection behind an async mutex — what every sync function reads
@@ -28,6 +30,29 @@ type Db = Mutex<Connection>;
 const READ_TAG: &str = "user/-/state/com.google/read";
 const STARRED_TAG: &str = "user/-/state/com.google/starred";
 const READING_LIST: &str = "user/-/state/com.google/reading-list";
+/// GReader "label" stream prefix. Folders are labels server-side, so a feed is
+/// filed by adding/removing `user/-/label/NAME` on its subscription.
+const LABEL_PREFIX: &str = "user/-/label/";
+
+/// The GReader label stream id for a folder name.
+fn label_stream(name: &str) -> String {
+    format!("{LABEL_PREFIX}{name}")
+}
+
+/// The `(add, remove)` label pair a folder change needs, or `None` when both
+/// sides already agree. `local` wins on conflict — a feed the user has filed by
+/// hand is not yanked back to the server's folder. Adding the new label is
+/// enough for FreshRSS; the matching removal keeps other GReader servers from
+/// leaving the feed filed under both.
+fn folder_change(
+    local: Option<&str>,
+    server: Option<&str>,
+) -> Option<(Option<String>, Option<String>)> {
+    if local == server {
+        return None;
+    }
+    Some((local.map(label_stream), server.map(label_stream)))
+}
 
 /// Which GReader-compatible backend the user is connected to. The wire
 /// protocol is identical; only where the API root sits under the server URL
@@ -151,6 +176,10 @@ struct SubList {
 }
 #[derive(Deserialize)]
 struct Sub {
+    /// Server-side subscription id (`feed/<n>`), shared with `unread-count` so
+    /// the two responses can be joined.
+    #[serde(default)]
+    id: Option<String>,
     url: Option<String>,
     title: Option<String>,
     #[serde(default)]
@@ -209,6 +238,54 @@ struct Item {
 #[derive(Deserialize)]
 struct Href {
     href: String,
+}
+
+/// `tag/list` response. FreshRSS returns folders as `user/-/label/*` entries
+/// tagged `type: "folder"` and article tags as `type: "tag"`; older/Miniflux
+/// servers may omit `type`, so it is optional.
+#[derive(Deserialize)]
+struct TagList {
+    #[serde(default)]
+    tags: Vec<Tag>,
+}
+#[derive(Deserialize)]
+struct Tag {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+impl Tag {
+    /// The folder name this tag denotes, or `None` for anything that isn't a
+    /// real folder. A `type` of "tag" (a FreshRSS article label) or the built-in
+    /// "Uncategorized" bucket is skipped, matching `SubCat::folder_name`.
+    fn folder_name(&self) -> Option<String> {
+        let name = self.id.strip_prefix(LABEL_PREFIX)?.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("Uncategorized") {
+            return None;
+        }
+        if self.kind.as_deref().is_some_and(|k| k != "folder") {
+            return None;
+        }
+        Some(name.to_string())
+    }
+}
+
+/// `unread-count` response: one entry per feed (`feed/<n>`), per label, and a
+/// `reading-list` total. We only need the per-feed counts, joined to local
+/// feeds via the subscription ids.
+#[derive(Deserialize)]
+struct UnreadCounts {
+    #[serde(default)]
+    unreadcounts: Vec<UnreadCount>,
+}
+#[derive(Deserialize)]
+struct UnreadCount {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    count: i64,
 }
 
 /// Stored GReader connection. We persist the long-lived auth token rather
@@ -293,6 +370,9 @@ pub async fn disconnect(db: &Db) -> AppResult<()> {
     ] {
         db::set_setting(&conn, key, "")?;
     }
+    // Drop the cached server unread counts too — with no server there is no
+    // authoritative figure, so the sidebar reverts to local counts.
+    db::clear_server_unread(&conn)?;
     Ok(())
 }
 
@@ -306,18 +386,272 @@ pub async fn run_if_connected(db: &Db, http: &Client) -> AppResult<bool> {
     }
 }
 
-/// Local feed URLs the server doesn't already carry, so each can be subscribed
-/// remotely. Pure set difference, factored out of `sync_now` so the selection
-/// is unit-testable without a live server.
-fn feeds_to_push<'a>(
-    local: &'a [String],
-    server: &std::collections::HashSet<String>,
-) -> Vec<&'a str> {
-    local
-        .iter()
-        .filter(|u| !server.contains(*u))
-        .map(String::as_str)
-        .collect()
+/// Drain queued feed-/folder-level operations (unsubscribe, folder rename or
+/// delete, bulk mark-read). Unlike the article queue these are destructive —
+/// the local row they described is already gone — so a failed push is left in
+/// `sync_ops` to retry on the next sync rather than dropped.
+async fn push_ops(db: &Db, http: &Client, session: &Session) {
+    let ops = {
+        let conn = db.lock().await;
+        match db::list_ops(&conn) {
+            Ok(ops) => ops,
+            Err(e) => {
+                log::warn!("sync: could not read pending ops: {e}");
+                return;
+            }
+        }
+    };
+    for op in ops {
+        let token = session.token.as_str();
+        let ok = match op.kind.as_str() {
+            db::OP_UNSUBSCRIBE => {
+                let stream = format!("feed/{}", op.target);
+                session
+                    .post(http, "subscription/edit")
+                    .form(&[("ac", "unsubscribe"), ("s", stream.as_str()), ("T", token)])
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok()
+            }
+            db::OP_RENAME_FOLDER => {
+                let from = label_stream(&op.target);
+                let to = label_stream(op.value.as_deref().unwrap_or_default());
+                session
+                    .post(http, "rename-tag")
+                    .form(&[("s", from.as_str()), ("dest", to.as_str()), ("T", token)])
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok()
+            }
+            db::OP_DELETE_FOLDER => {
+                let stream = label_stream(&op.target);
+                session
+                    .post(http, "disable-tag")
+                    .form(&[("s", stream.as_str()), ("T", token)])
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok()
+            }
+            db::OP_MARK_ALL_READ => {
+                let ts = op.value.as_deref().unwrap_or("0");
+                session
+                    .post(http, "mark-all-as-read")
+                    .form(&[("s", op.target.as_str()), ("ts", ts), ("T", token)])
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok()
+            }
+            other => {
+                log::warn!("sync: dropping unknown op kind {other}");
+                true
+            }
+        };
+        if ok {
+            let conn = db.lock().await;
+            if let Err(e) = db::delete_op(&conn, op.id) {
+                log::warn!("sync: could not clear op #{}: {e}", op.id);
+            }
+        } else {
+            log::warn!("sync: op #{} ({}) failed, will retry", op.id, op.kind);
+        }
+    }
+}
+
+/// The server's subscription view, built from `subscription/list` and diffed
+/// against local state to decide what to push.
+struct ServerSubs {
+    urls: HashSet<String>,
+    folder: HashMap<String, Option<String>>,
+    title: HashMap<String, String>,
+    /// Server subscription id (`feed/<n>`) → feed URL, to join the
+    /// `unread-count` response (keyed by the same id) back onto local feeds.
+    id_to_url: HashMap<String, String>,
+}
+
+/// Push the local subscription state onto the server: subscribe feeds the
+/// server lacks, and — for feeds both sides carry — reconcile the folder label
+/// and (when the user renamed it by hand) the title, local winning. `skip` is
+/// the set of feed URLs with a pending unsubscribe whose push hasn't landed, so
+/// a re-added feed isn't subscribed while its delete is still in flight.
+/// `stale_folders` names folders with a queued rename/delete still live on the
+/// server under that name; a feed still filed there is left alone rather than
+/// fought.
+async fn push_subscriptions(
+    http: &Client,
+    session: &Session,
+    local: &[db::SyncFeed],
+    server: &ServerSubs,
+    skip: &HashSet<String>,
+    stale_folders: &HashSet<String>,
+) {
+    let token = session.token.as_str();
+    for feed in local {
+        if skip.contains(&feed.url) {
+            continue;
+        }
+        let stream = format!("feed/{}", feed.url);
+        if !server.urls.contains(&feed.url) {
+            // Local-only feed: subscribe it, filing it into its folder in the
+            // same call when it has one (the server creates the label on demand).
+            let label = feed.folder.as_deref().map(label_stream);
+            let mut form = vec![("ac", "subscribe"), ("s", stream.as_str())];
+            if let Some(label) = label.as_deref() {
+                form.push(("a", label));
+            }
+            form.push(("T", token));
+            if !session
+                .post(http, "subscription/edit")
+                .form(&form)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .is_ok()
+            {
+                log::warn!("sync: failed to subscribe server to {}", feed.url);
+            }
+            continue;
+        }
+
+        // Present on both sides: align folder membership. Skip a feed the server
+        // still files under a folder whose rename/delete is queued — that op, not
+        // a move, is what reconciles it.
+        let server_folder = server.folder.get(&feed.url).cloned().flatten();
+        if !server_folder.as_deref().is_some_and(|f| stale_folders.contains(f)) {
+            if let Some((add, remove)) = folder_change(feed.folder.as_deref(), server_folder.as_deref())
+            {
+                let mut form = vec![("ac", "edit"), ("s", stream.as_str())];
+                if let Some(add) = add.as_deref() {
+                    form.push(("a", add));
+                }
+                if let Some(remove) = remove.as_deref() {
+                    form.push(("r", remove));
+                }
+                form.push(("T", token));
+                if !session
+                    .post(http, "subscription/edit")
+                    .form(&form)
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok()
+                {
+                    log::warn!("sync: failed to file {} into its folder", feed.url);
+                }
+            }
+        }
+
+        // Align the title only when the user renamed the feed here, so a
+        // server-side title the user never touched is left alone.
+        if feed.custom_title {
+            if let Some(server_title) = server.title.get(&feed.url) {
+                if &feed.title != server_title
+                    && !session
+                        .post(http, "subscription/edit")
+                        .form(&[
+                            ("ac", "edit"),
+                            ("s", stream.as_str()),
+                            ("t", feed.title.as_str()),
+                            ("T", token),
+                        ])
+                        .send()
+                        .await
+                        .and_then(|r| r.error_for_status())
+                        .is_ok()
+                {
+                    log::warn!("sync: failed to rename {}", feed.url);
+                }
+            }
+        }
+    }
+}
+
+/// Pull the server's folder (label) list so folders that hold no feeds here yet
+/// still appear locally. Best-effort: a server without `tag/list` (some Miniflux
+/// builds) just skips it. `stale_folders` names folders with a pending local
+/// delete/rename, still live on the server under that name, so the pull can't
+/// resurrect one whose op hasn't reached the server.
+async fn pull_folders(db: &Db, http: &Client, session: &Session, stale_folders: &HashSet<String>) {
+    let list: TagList = match session
+        .get(http, "tag/list?output=json")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(resp) => match resp.json().await {
+            Ok(list) => list,
+            Err(e) => {
+                log::warn!("sync: tag/list decode failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            log::warn!("sync: tag/list unavailable: {e}");
+            return;
+        }
+    };
+    let conn = db.lock().await;
+    for name in list.tags.iter().filter_map(Tag::folder_name) {
+        if stale_folders.contains(&name) {
+            continue;
+        }
+        if let Err(e) = db::folder_id_by_name(&conn, &name) {
+            log::warn!("sync: could not create folder {name}: {e}");
+        }
+    }
+}
+
+/// Pull the server's authoritative per-feed unread counts and cache them on
+/// `feeds.server_unread`, so the sidebar and badge show the server's figures
+/// (which include items Papr hasn't fetched). The response is keyed by server
+/// subscription id, joined to local feeds through `id_to_url`. Best-effort: a
+/// server without `unread-count` (or a decode failure) leaves the local counts
+/// in place. Feeds the server doesn't report have their cache cleared by
+/// `apply_server_unread`.
+async fn pull_unread_counts(
+    db: &Db,
+    http: &Client,
+    session: &Session,
+    id_to_url: &HashMap<String, String>,
+) {
+    let resp = match session
+        .get(http, "unread-count?output=json&all=1")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            log::warn!("sync: unread-count unavailable: {e}");
+            return;
+        }
+    };
+    let body: UnreadCounts = match resp.json().await {
+        Ok(body) => body,
+        Err(e) => {
+            log::warn!("sync: unread-count decode failed: {e}");
+            return;
+        }
+    };
+    let conn = db.lock().await;
+    let mut counts: HashMap<i64, i64> = HashMap::new();
+    for entry in &body.unreadcounts {
+        let Some(server_id) = entry.id.strip_prefix("feed/") else {
+            continue;
+        };
+        let Some(url) = id_to_url.get(server_id) else {
+            continue;
+        };
+        if let Ok(Some(feed_id)) = db::find_feed_by_url(&conn, url) {
+            counts.insert(feed_id, entry.count);
+        }
+    }
+    if let Err(e) = db::apply_server_unread(&conn, &counts) {
+        log::warn!("sync: could not cache server unread counts: {e}");
+    }
 }
 
 /// A single article the server flags as unread or starred: its item id and the
@@ -436,7 +770,26 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         }
     }
 
-    // 2 ── pull subscriptions: subscribe locally to any feed we don't have.
+    // 1b ── push queued feed-/folder-level operations (unsubscribe, folder
+    // rename/delete, bulk mark-read). Draining before the pull means the
+    // subscription list read next already reflects them.
+    push_ops(db, http, &session).await;
+
+    // 2 ── pull subscriptions: subscribe locally to any feed we don't have, and
+    // adopt the server's folder for a feed not yet filed here. Feeds with a
+    // pending unsubscribe are ignored so a delete that hasn't landed yet isn't
+    // undone by this pull.
+    let (pending_unsubs, stale_folders): (HashSet<String>, HashSet<String>) = {
+        let conn = db.lock().await;
+        let subs = db::pending_op_targets(&conn, db::OP_UNSUBSCRIBE)?.into_iter().collect();
+        // A queued folder rename/delete leaves the old label live on the server;
+        // treat it as stale everywhere so the pull doesn't recreate it and the
+        // move-diff doesn't fight the queued op.
+        let mut stale: HashSet<String> =
+            db::pending_op_targets(&conn, db::OP_DELETE_FOLDER)?.into_iter().collect();
+        stale.extend(db::pending_op_targets(&conn, db::OP_RENAME_FOLDER)?);
+        (subs, stale)
+    };
     let subs: SubList = session
         .get(http, "subscription/list?output=json")
         .send()
@@ -444,26 +797,54 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         .error_for_status()?
         .json()
         .await?;
-    let server_urls: std::collections::HashSet<String> = subs
-        .subscriptions
-        .iter()
-        .filter_map(|s| s.url.clone())
-        .filter(|u| !u.is_empty())
-        .collect();
+
+    // The server's view, used both for the local pull below and for the push
+    // diff: per-URL folder and title, skipping feeds being unsubscribed.
+    let mut server = ServerSubs {
+        urls: HashSet::new(),
+        folder: HashMap::new(),
+        title: HashMap::new(),
+        id_to_url: HashMap::new(),
+    };
+    for sub in &subs.subscriptions {
+        let Some(url) = sub.url.as_deref().filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        if pending_unsubs.contains(url) {
+            continue;
+        }
+        server.urls.insert(url.to_string());
+        server
+            .folder
+            .insert(url.to_string(), sub.categories.iter().find_map(SubCat::folder_name));
+        if let Some(title) = &sub.title {
+            server.title.insert(url.to_string(), title.clone());
+        }
+        // `feed/<n>` → URL, so `unread-count` (keyed by the same id) can be
+        // joined back to a local feed.
+        if let Some(id) = sub.id.as_deref().and_then(|i| i.strip_prefix("feed/")) {
+            server.id_to_url.insert(id.to_string(), url.to_string());
+        }
+    }
     {
         let conn = db.lock().await;
         for sub in subs.subscriptions {
             // Resolve the server-side folder (GReader "label") before moving
-            // `url` out of `sub`, mapping it onto a local folder by name.
+            // `url` out of `sub`, mapping it onto a local folder by name. A
+            // stale (pending-rename/delete) label is ignored.
             let folder_id = sub
                 .categories
                 .iter()
                 .find_map(SubCat::folder_name)
+                .filter(|name| !stale_folders.contains(name))
                 .map(|name| db::folder_id_by_name(&conn, &name))
                 .transpose()?;
             let Some(feed_url) = sub.url.filter(|u| !u.is_empty()) else {
                 continue;
             };
+            if pending_unsubs.contains(&feed_url) {
+                continue;
+            }
             match db::find_feed_by_url(&conn, &feed_url)? {
                 None => {
                     let title = sub.title.unwrap_or_else(|| feed_url.clone());
@@ -485,30 +866,30 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
     }
 
     // 2b ── push subscriptions: subscribe the server to any local feed it
-    // doesn't have yet, so adding a feed in the app propagates to the server
-    // instead of leaving the two sides to drift. Best-effort and idempotent —
-    // re-subscribing a feed the server already has is a no-op there.
+    // doesn't have, file each feed into its folder and push a hand-set title,
+    // so organising feeds in Papr propagates to the server instead of leaving
+    // the two sides to drift. Best-effort and idempotent.
     let local_feeds = {
         let conn = db.lock().await;
-        db::feed_urls_for_sync(&conn)?
+        db::feeds_for_sync(&conn)?
     };
-    for url in feeds_to_push(&local_feeds, &server_urls) {
-        let stream = format!("feed/{url}");
-        let pushed = session
-            .post(http, "subscription/edit")
-            .form(&[
-                ("ac", "subscribe"),
-                ("s", stream.as_str()),
-                ("T", session.token.as_str()),
-            ])
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .is_ok();
-        if !pushed {
-            log::warn!("sync: failed to subscribe server to {url}");
-        }
-    }
+    push_subscriptions(
+        http,
+        &session,
+        &local_feeds,
+        &server,
+        &pending_unsubs,
+        &stale_folders,
+    )
+    .await;
+
+    // 2c ── pull the server's folder list so folders holding no feeds here yet
+    // still show up. Best-effort: skipped if the server has no `tag/list`.
+    pull_folders(db, http, &session, &stale_folders).await;
+
+    // 2d ── pull the server's per-feed unread counts, making the sidebar and
+    // badge server-authoritative. Best-effort.
+    pull_unread_counts(db, http, &session, &server.id_to_url).await;
 
     // 3 ── reconcile read/starred state, treating the server as the source of
     // truth. Papr polls each subscribed feed's raw RSS independently and marks
@@ -540,7 +921,7 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         // Scope the read/starred sweep to feeds the server actually knows about,
         // so a local-only feed not yet mirrored server-side isn't wrongly marked
         // all-read. Articles with an un-pushed local edit are left untouched.
-        let server_feed_ids = db::feed_ids_by_urls(&conn, &server_urls)?;
+        let server_feed_ids = db::feed_ids_by_urls(&conn, &server.urls)?;
         db::reconcile_sync_state(&conn, &server_feed_ids, &unread_urls, &starred_urls)?
     };
     Ok(reconciled)
@@ -593,25 +974,38 @@ mod tests {
     }
 
     #[test]
-    fn feeds_to_push_selects_only_local_only_feeds() {
-        let local = vec![
-            "https://a.example/feed".to_string(),
-            "https://b.example/feed".to_string(),
-            "https://c.example/feed".to_string(),
-        ];
-        let server: std::collections::HashSet<String> =
-            ["https://b.example/feed".to_string()].into_iter().collect();
+    fn folder_change_none_when_sides_agree() {
+        assert_eq!(folder_change(None, None), None);
+        assert_eq!(folder_change(Some("Tech"), Some("Tech")), None);
+    }
+
+    #[test]
+    fn folder_change_adds_new_label_local_wins() {
+        // A feed the user filed by hand is pushed even when the server had it
+        // elsewhere or unfiled; a folder change clears the stale server label.
         assert_eq!(
-            feeds_to_push(&local, &server),
-            vec!["https://a.example/feed", "https://c.example/feed"]
+            folder_change(Some("Tech"), Some("News")),
+            Some((Some(label_stream("Tech")), Some(label_stream("News"))))
+        );
+        assert_eq!(
+            folder_change(Some("Tech"), None),
+            Some((Some(label_stream("Tech")), None))
         );
     }
 
     #[test]
-    fn feeds_to_push_empty_when_server_has_everything() {
-        let local = vec!["https://a.example/feed".to_string()];
-        let server: std::collections::HashSet<String> =
-            ["https://a.example/feed".to_string()].into_iter().collect();
-        assert!(feeds_to_push(&local, &server).is_empty());
+    fn tag_folder_name_only_accepts_labels() {
+        let folder = Tag { id: label_stream("Tech"), kind: Some("folder".into()) };
+        assert_eq!(folder.folder_name().as_deref(), Some("Tech"));
+
+        // A FreshRSS article tag (type "tag") is not a folder.
+        let article_tag = Tag { id: label_stream("Later"), kind: Some("tag".into()) };
+        assert_eq!(article_tag.folder_name(), None);
+
+        // System state tags and the built-in bucket are skipped.
+        let state = Tag { id: READ_TAG.into(), kind: None };
+        assert_eq!(state.folder_name(), None);
+        let uncat = Tag { id: label_stream("Uncategorized"), kind: Some("folder".into()) };
+        assert_eq!(uncat.folder_name(), None);
     }
 }

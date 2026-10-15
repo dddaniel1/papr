@@ -1271,6 +1271,20 @@ pub async fn clear_all_data(app: AppHandle) -> AppResult<()> {
     Ok(())
 }
 
+/// Delete every stored article, keeping subscriptions and folders. Returns the
+/// number removed.
+#[tauri::command]
+pub async fn clear_articles(app: AppHandle) -> AppResult<usize> {
+    let n = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().await;
+        db::clear_articles(&conn)?
+    };
+    let _ = app.emit("feeds-updated", 0);
+    refresh_unread_surfaces(&app).await;
+    Ok(n)
+}
+
 // ─────────────────────────── network ───────────────────────────
 
 /// Rebuild the HTTP client from the persisted proxy / timeout settings so the

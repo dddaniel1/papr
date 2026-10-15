@@ -181,7 +181,8 @@ enum Cmd {
     },
     /// Show database storage statistics.
     Stats,
-    /// Maintenance: retention cleanup, VACUUM, reset settings (destructive).
+    /// Maintenance: retention cleanup, clearing all data, VACUUM, reset
+    /// settings (destructive).
     Admin {
         #[command(subcommand)]
         cmd: AdminCmd,
@@ -404,6 +405,18 @@ enum AdminCmd {
     /// Delete read articles older than N days (keeps starred / read-later).
     Cleanup {
         days: i64,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete every stored article, keeping feeds and folders.
+    #[command(name = "clear-articles")]
+    ClearArticles {
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete every feed and folder (all subscriptions) with their articles.
+    #[command(name = "clear-feeds")]
+    ClearFeeds {
         #[arg(long)]
         yes: bool,
     },
@@ -1529,6 +1542,16 @@ fn cmd_admin(path: &Path, cmd: AdminCmd) -> Result<String, AxiError> {
             require_yes(yes, "cleanup", &format!("papr admin cleanup {days}"))?;
             let n = db::cleanup_old_articles(&conn, days).map_err(db_err)?;
             ok_line(format!("cleanup: removed {n} article(s) older than {days} days"))
+        }
+        AdminCmd::ClearArticles { yes } => {
+            require_yes(yes, "clear-articles", "papr admin clear-articles")?;
+            let n = db::clear_articles(&conn).map_err(db_err)?;
+            ok_line(format!("clear-articles: removed {n} article(s); feeds kept"))
+        }
+        AdminCmd::ClearFeeds { yes } => {
+            require_yes(yes, "clear-feeds", "papr admin clear-feeds")?;
+            let n = db::clear_subscriptions(&conn).map_err(db_err)?;
+            ok_line(format!("clear-feeds: removed {n} feed(s) and all folders"))
         }
         AdminCmd::Vacuum { yes } => {
             require_yes(yes, "vacuum", "papr admin vacuum")?;

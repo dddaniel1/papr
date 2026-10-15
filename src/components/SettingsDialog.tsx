@@ -1579,12 +1579,15 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
   );
 }
 
-/** Danger zone — reset settings, wipe all local data. Each action is gated by
- *  a themed ConfirmDialog rather than the native, unstyled window.confirm. */
+/** Danger zone — reset settings, clear all articles, wipe all local data. Each
+ *  action is gated by a themed ConfirmDialog rather than the native, unstyled
+ *  window.confirm. */
 function DangerZone({ onToast }: { onToast: (m: string) => void }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
-  const [confirming, setConfirming] = useState<null | "reset" | "clear">(null);
+  const [confirming, setConfirming] = useState<
+    null | "reset" | "articles" | "clear"
+  >(null);
 
   const doReset = async () => {
     try {
@@ -1612,6 +1615,15 @@ function DangerZone({ onToast }: { onToast: (m: string) => void }) {
       reportError(e);
     }
   };
+  const doClearArticles = async () => {
+    try {
+      await api.clearArticles();
+      await qc.invalidateQueries();
+      onToast(t("settings.advanced.clearArticlesDone"));
+    } catch (e) {
+      reportError(e);
+    }
+  };
   const doClear = async () => {
     try {
       await api.clearAllData();
@@ -1634,6 +1646,14 @@ function DangerZone({ onToast }: { onToast: (m: string) => void }) {
         </button>
       </Row>
       <Row
+        label={t("settings.advanced.clearArticles")}
+        desc={t("settings.advanced.clearArticlesDesc")}
+      >
+        <button className="s-btn danger" onClick={() => setConfirming("articles")}>
+          {t("settings.advanced.clear")}
+        </button>
+      </Row>
+      <Row
         label={t("settings.advanced.clearData")}
         desc={t("settings.advanced.clearDataDesc")}
       >
@@ -1647,6 +1667,15 @@ function DangerZone({ onToast }: { onToast: (m: string) => void }) {
           message={t("settings.advanced.resetConfirm")}
           confirmLabel={t("settings.advanced.reset")}
           onConfirm={doReset}
+          onClose={() => setConfirming(null)}
+        />
+      )}
+      {confirming === "articles" && (
+        <ConfirmDialog
+          title={t("settings.advanced.clearArticles")}
+          message={t("settings.advanced.clearArticlesConfirm")}
+          confirmLabel={t("common.delete")}
+          onConfirm={doClearArticles}
           onClose={() => setConfirming(null)}
         />
       )}

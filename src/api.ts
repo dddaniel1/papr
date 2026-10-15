@@ -237,6 +237,9 @@ export const cleanupArticles = (days: number) =>
 export const vacuumDb = () => invoke<void>("vacuum_db");
 export const resetSettings = () => invoke<void>("reset_settings");
 export const clearAllData = () => invoke<void>("clear_all_data");
+/** Delete every stored article, keeping subscriptions and folders. Returns the
+ *  number removed. */
+export const clearArticles = () => invoke<number>("clear_articles");
 
 // ── network ──
 export const applyNetworkSettings = () =>

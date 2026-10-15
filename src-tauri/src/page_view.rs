@@ -19,7 +19,8 @@
 //! Built on Tauri's `unstable` child-webview API; see `Cargo.toml`.
 
 use tauri::{
-    webview::WebviewBuilder, AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl,
+    webview::WebviewBuilder, AppHandle, LogicalPosition, LogicalSize, Manager, Webview,
+    WebviewUrl,
 };
 
 /// Label of the single, reused original-page child webview.
@@ -27,6 +28,31 @@ const LABEL: &str = "page-view";
 
 fn parse_url(url: &str) -> Result<url::Url, String> {
     url.parse().map_err(|_| format!("invalid url: {url}"))
+}
+
+/// Apply a rectangle to an open page view. On macOS/Windows this is the native
+/// `set_position` / `set_size`; on Linux those are no-ops for a child webview,
+/// so we drive the GTK overlay's `Fixed::move_` + size request instead
+/// (page_overlay.rs).
+#[cfg(not(target_os = "linux"))]
+fn apply_bounds(
+    view: &Webview,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    view.set_position(position).map_err(|e| e.to_string())?;
+    view.set_size(size).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn apply_bounds(
+    view: &Webview,
+    position: LogicalPosition<f64>,
+    size: LogicalSize<f64>,
+) -> Result<(), String> {
+    crate::page_overlay::set_child_bounds(view, position.x, position.y, size.width, size.height);
+    Ok(())
 }
 
 /// Show the original page at `url` over the given reading-area rectangle.
@@ -47,8 +73,7 @@ pub async fn open_page_view(
 
     if let Some(view) = app.get_webview(LABEL) {
         view.navigate(parsed).map_err(|e| e.to_string())?;
-        view.set_position(position).map_err(|e| e.to_string())?;
-        view.set_size(size).map_err(|e| e.to_string())?;
+        apply_bounds(&view, position, size)?;
         return Ok(());
     }
 
@@ -56,9 +81,16 @@ pub async fn open_page_view(
     // WebviewWindow's underlying Window shares its "main" label.
     let window = app.get_window("main").ok_or("main window not found")?;
     let builder = WebviewBuilder::new(LABEL, WebviewUrl::External(parsed));
-    window
+    let view = window
         .add_child(builder, position, size)
         .map_err(|e| e.to_string())?;
+    // Linux: the child landed in the window's GtkBox (stacked) — move it onto
+    // the overlay Fixed so it actually floats over the reader. macOS/Windows
+    // already placed it correctly at creation, so nothing more to do.
+    #[cfg(target_os = "linux")]
+    crate::page_overlay::attach_child(&view, x, y, width, height);
+    #[cfg(not(target_os = "linux"))]
+    let _ = view;
     Ok(())
 }
 
@@ -73,10 +105,7 @@ pub async fn set_page_view_bounds(
     height: f64,
 ) -> Result<(), String> {
     if let Some(view) = app.get_webview(LABEL) {
-        view.set_position(LogicalPosition::new(x, y))
-            .map_err(|e| e.to_string())?;
-        view.set_size(LogicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
+        apply_bounds(&view, LogicalPosition::new(x, y), LogicalSize::new(width, height))?;
     }
     Ok(())
 }

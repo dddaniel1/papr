@@ -3454,6 +3454,7 @@ dependencies = [
  "ego-tree",
  "encoding_rs",
  "feed-rs",
+ "gtk",
  "imap",
  "lettre",
  "log",
