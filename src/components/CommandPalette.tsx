@@ -16,6 +16,7 @@ export type CommandAction =
   | "toggle-theme"
   | "toggle-focus"
   | "toggle-ai"
+  | "toggle-folders"
   | "refresh"
   | "add-feed"
   | "new-folder"
@@ -45,6 +46,7 @@ const ACTIONS: { icon: IconName; labelKey: string; hint: string; action: Command
   { icon: "globe", labelKey: "commandPalette.actionToggleTheme", hint: "⇧D", action: "toggle-theme" },
   { icon: "focus", labelKey: "commandPalette.actionToggleFocus", hint: "F", action: "toggle-focus" },
   { icon: "sparkle", labelKey: "commandPalette.actionToggleAi", hint: "I", action: "toggle-ai" },
+  { icon: "folder", labelKey: "commandPalette.actionToggleFolders", hint: "⇧F", action: "toggle-folders" },
   { icon: "refresh", labelKey: "commandPalette.actionRefresh", hint: modCombo("R"), action: "refresh" },
   { icon: "plus", labelKey: "commandPalette.actionAddFeed", hint: "A", action: "add-feed" },
   { icon: "folder", labelKey: "commandPalette.actionNewFolder", hint: "", action: "new-folder" },

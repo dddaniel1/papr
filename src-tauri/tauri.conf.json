@@ -17,7 +17,7 @@
         "title": "Papr",
         "width": 1280,
         "height": 820,
-        "minWidth": 920,
+        "minWidth": 600,
         "minHeight": 560,
         "backgroundColor": "#FBF9F3",
         "titleBarStyle": "Overlay",

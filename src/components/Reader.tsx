@@ -731,6 +731,21 @@ export default function Reader({ onToast }: Props) {
     linkClick(e);
   };
 
+  const backButton = (
+    <button
+      className="tb-btn reader-back"
+      title={t("reader.backToList")}
+      aria-label={t("reader.backToList")}
+      onClick={() => {
+        useUi.getState().openArticle(null);
+        useUi.getState().setFocusMode(false);
+        useUi.getState().setAiOpen(false);
+      }}
+    >
+      <span className="reader-back-icon"><Icon name="chevron-right" size={16} /></span>
+    </button>
+  );
+
   if (id == null) {
     const kbd = {
       fontFamily: "var(--mono)",
@@ -762,7 +777,9 @@ export default function Reader({ onToast }: Props) {
   if (!a) {
     return (
       <div className="reader" role="main">
-        {isMac && <div className="reader-toolbar" data-tauri-drag-region />}
+        <div className="reader-toolbar reader-loading-toolbar" {...(isMac && { "data-tauri-drag-region": true })}>
+          {backButton}
+        </div>
         {article.isError ? (
           <div className="empty" style={{ flex: 1 }}>
             <div className="glyph">
@@ -825,6 +842,7 @@ export default function Reader({ onToast }: Props) {
         className={`reader-toolbar ${scrolled ? "scrolled" : ""}`}
         {...(isMac && { "data-tauri-drag-region": true })}
       >
+        {backButton}
         <button
           className={`tb-btn ${a.isStarred ? "on" : ""}`}
           onClick={() => actions.setStarred(a.id, !a.isStarred)}

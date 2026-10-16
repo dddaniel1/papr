@@ -60,12 +60,38 @@ const READ_POOL_SIZE: usize = 4;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Restore the window the way `window-state` is meant to, with one
+    // exception on Linux.
+    //
+    // That plugin applies a saved window *size* verbatim — it checks the saved
+    // position against the monitors that exist now, but never the size — so a
+    // size saved on a larger display, or a maximized size saved while the
+    // display was scaled differently, is reinstated even when it cannot fit.
+    // That is not merely ungainly: the compositor then scales the oversized
+    // surface down to the window it actually granted, per axis, and the whole
+    // UI arrives warped — text stretched, square feed avatars drawn as tall
+    // rectangles. It reads as "it distorts at some window sizes but not
+    // others", because the mismatch is smallest at the size it was saved at.
+    //
+    // Linux owns window geometry through its own compositor (tiling WMs and
+    // Wayland generally), and the app has no say in it, so on Linux the size
+    // is simply not restored: the window opens at the configured size, and
+    // position, maximized and fullscreen still restore. macOS and Windows keep
+    // the full behaviour, where the app does own its geometry and the OS
+    // clamps an oversized window.
+    let window_state = tauri_plugin_window_state::Builder::default();
+    #[cfg(target_os = "linux")]
+    let window_state = window_state.with_state_flags({
+        use tauri_plugin_window_state::StateFlags;
+        StateFlags::all() & !StateFlags::SIZE
+    });
+
     let mut builder = tauri::Builder::default()
+        .plugin(window_state.build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -207,10 +233,12 @@ pub fn run() {
             // ── Linux: overlay container for the in-app original-page view ──
             // Tauri parents child webviews to the window's GtkBox on Linux, so
             // they stack instead of floating. Restructure the window content
-            // into a GtkFixed once, up front, so `page_view` can overlay the
+            // into a GtkLayout once, up front, so `page_view` can overlay the
             // reader (page_overlay.rs). No-op after the first run.
             #[cfg(target_os = "linux")]
             if let Some(win) = app.get_webview_window("main") {
+                // Tiling compositors may grant less space than our desktop minimum.
+                win.set_min_size(None::<tauri::LogicalSize<f64>>)?;
                 page_overlay::install(&win);
             }
 

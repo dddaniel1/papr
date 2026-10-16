@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef } from "react";
 
 interface Props {
-  /** Pixel width of the pane this handle resizes, at drag start. */
+  /** Pixel width of the pane this handle resizes, at drag start. Used for the
+   *  keyboard steps, and as the fallback when `varName` is absent or unset. */
   width: number;
+  /**
+   * Name of the CSS custom property carrying the pane's *rendered* width, if
+   * it differs from `width`. A window can clamp a pane narrower than its
+   * stored width (see lib/layout.ts), and this handle's `left` already tracks
+   * that property — so the drag must start from the same live value, or the
+   * first pixel of movement would snap the pane out to its pre-clamp width.
+   */
+  varName?: string;
   /** `right`: dragging right grows the pane (sidebar / list, handle on the
    *  pane's right edge). `left`: dragging left grows the pane (the AI drawer,
    *  handle on its left edge). */
@@ -15,6 +24,19 @@ interface Props {
   onResize: (width: number) => void;
   /** Accessible label for the separator. */
   label: string;
+}
+
+/**
+ * The pane's live width: the custom property when the caller named one (the
+ * window may be clamping the pane narrower than its stored width), else the
+ * prop.
+ */
+function liveWidth(varName: string | undefined, fallback: number): number {
+  if (!varName) return fallback;
+  const px = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(varName),
+  );
+  return Number.isFinite(px) ? px : fallback;
 }
 
 /**
@@ -34,18 +56,22 @@ interface Props {
  * handle draws no line on hover/drag now (the `col-resize` cursor is the
  * affordance); only keyboard focus shows one, where capture loss can't apply.
  */
-export default function ResizeHandle({ width, side, min, max, onResize, label }: Props) {
+export default function ResizeHandle({ width, varName, side, min, max, onResize, label }: Props) {
   // Latest props in a ref so the move/up listeners (bound once per drag) always
   // read fresh values without re-binding mid-drag.
-  const latest = useRef({ width, side, min, max, onResize });
-  latest.current = { width, side, min, max, onResize };
+  const latest = useRef({ width, varName, side, min, max, onResize });
+  latest.current = { width, varName, side, min, max, onResize };
+
+  const cleanupDrag = useRef<(() => void) | null>(null);
 
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     // Ignore secondary buttons so a right-click context menu can't start a drag.
     if (e.button !== 0) return;
     e.preventDefault();
+    cleanupDrag.current?.();
     const startX = e.clientX;
-    const { width: startW } = latest.current;
+    const { width, varName } = latest.current;
+    const startW = liveWidth(varName, width);
 
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
@@ -63,30 +89,34 @@ export default function ResizeHandle({ width, side, min, max, onResize, label }:
       document.body.style.userSelect = "";
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      cleanupDrag.current = null;
     };
+    cleanupDrag.current = up;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   }, []);
 
   // Keyboard a11y: arrow keys nudge the boundary in 16px steps for users who
   // can't drag.
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    const { width, side, min, max, onResize } = latest.current;
+    const { width, varName, side, min, max, onResize } = latest.current;
     const step = e.shiftKey ? 48 : 16;
     let delta = 0;
     if (e.key === "ArrowLeft") delta = side === "right" ? -step : step;
     else if (e.key === "ArrowRight") delta = side === "right" ? step : -step;
     else return;
     e.preventDefault();
-    onResize(Math.min(max, Math.max(min, width + delta)));
+    const startW = liveWidth(varName, width);
+    onResize(Math.min(max, Math.max(min, startW + delta)));
   }, []);
 
   // Belt-and-braces: if this handle unmounts mid-drag (e.g. focus mode hides
   // the panes), make sure the global cursor/select overrides are cleared.
   useEffect(() => {
     return () => {
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
+      cleanupDrag.current?.();
     };
   }, []);
 

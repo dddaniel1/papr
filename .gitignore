@@ -27,6 +27,7 @@ a.out
 
 # ralph-loop local state
 .claude/
+.serena/
 *.suo
 *.ntvs*
 *.njsproj

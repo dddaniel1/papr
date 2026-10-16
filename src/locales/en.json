@@ -111,7 +111,10 @@
     "readLaterRemoved": "Removed from read later",
     "newFolderTitle": "New folder",
     "folderNamePlaceholder": "Folder name",
-    "folderCreated": "Folder created"
+    "folderCreated": "Folder created",
+    "allFoldersExpanded": "All folders expanded",
+    "allFoldersCollapsed": "All folders collapsed",
+    "noFolders": "No folders"
   },
   "articleList": {
     "markedReadToast": "Marked {{count}} articles as read",
@@ -148,6 +151,7 @@
     "actionToggleTheme": "Toggle dark / light theme",
     "actionToggleFocus": "Focus mode",
     "actionToggleAi": "AI summary of current article",
+    "actionToggleFolders": "Expand / collapse all folders",
     "actionRefresh": "Refresh all feeds",
     "actionAddFeed": "Add feed…",
     "actionNewFolder": "New folder…",
@@ -166,6 +170,7 @@
     "footerHint": "Articles · Feeds · Commands"
   },
   "reader": {
+    "backToList": "Back to articles",
     "resizeAi": "Resize AI summary panel",
     "fullTextExtracted": "Full text extracted",
     "linkCopied": "Link copied",
@@ -427,6 +432,7 @@
       "focusReading": "Focus reading",
       "hideRead": "Hide read",
       "toggleTheme": "Toggle dark / light",
+      "toggleFolders": "Expand / collapse all folders",
       "global": "Global",
       "commandPalette": "Command palette",
       "refreshAll": "Refresh all feeds",
@@ -533,6 +539,8 @@
     }
   },
   "sidebar": {
+    "expandSidebar": "Expand sidebar",
+    "collapseSidebar": "Collapse sidebar",
     "searchArticles": "Search articles",
     "library": "Library",
     "feeds": "Feeds",
@@ -557,6 +565,8 @@
     "refreshFolder": "Refresh folder",
     "expandFolder": "Expand folder",
     "collapseFolder": "Collapse folder",
+    "expandAllFolders": "Expand all folders",
+    "collapseAllFolders": "Collapse all folders",
     "addFeedShortcut": "Add feed (A)",
     "refreshAll": "Refresh all (⌘R)",
     "explore": "Explore feeds",

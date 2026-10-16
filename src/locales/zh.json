@@ -111,7 +111,10 @@
     "readLaterRemoved": "已从稍后读移除",
     "newFolderTitle": "新建文件夹",
     "folderNamePlaceholder": "文件夹名称",
-    "folderCreated": "已创建文件夹"
+    "folderCreated": "已创建文件夹",
+    "allFoldersExpanded": "已展开所有文件夹",
+    "allFoldersCollapsed": "已折叠所有文件夹",
+    "noFolders": "暂无文件夹"
   },
   "articleList": {
     "markedReadToast": "已将 {{count}} 篇标为已读",
@@ -148,6 +151,7 @@
     "actionToggleTheme": "切换深色 / 浅色模式",
     "actionToggleFocus": "焦点阅读模式",
     "actionToggleAi": "AI 摘要当前文章",
+    "actionToggleFolders": "展开 / 折叠所有文件夹",
     "actionRefresh": "刷新所有订阅源",
     "actionAddFeed": "添加订阅源…",
     "actionNewFolder": "新建文件夹…",
@@ -166,6 +170,7 @@
     "footerHint": "支持文章 · 订阅源 · 命令"
   },
   "reader": {
+    "backToList": "返回文章列表",
     "resizeAi": "调整 AI 摘要面板宽度",
     "fullTextExtracted": "已提取全文",
     "linkCopied": "链接已复制",
@@ -427,6 +432,7 @@
       "focusReading": "焦点阅读",
       "hideRead": "隐藏已读",
       "toggleTheme": "切换深 / 浅色",
+      "toggleFolders": "展开 / 折叠所有文件夹",
       "global": "全局",
       "commandPalette": "命令面板",
       "refreshAll": "刷新所有订阅源",
@@ -533,6 +539,8 @@
     }
   },
   "sidebar": {
+    "expandSidebar": "展开侧栏",
+    "collapseSidebar": "收起侧栏",
     "searchArticles": "搜索文章",
     "library": "资料库",
     "feeds": "订阅源",
@@ -557,6 +565,8 @@
     "refreshFolder": "刷新该文件夹",
     "expandFolder": "展开文件夹",
     "collapseFolder": "折叠文件夹",
+    "expandAllFolders": "展开所有文件夹",
+    "collapseAllFolders": "折叠所有文件夹",
     "addFeedShortcut": "添加订阅源 (A)",
     "refreshAll": "刷新所有 (⌘R)",
     "explore": "发现订阅源",

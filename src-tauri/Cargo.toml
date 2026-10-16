@@ -25,7 +25,7 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# Linux-only: the in-app original-page child webview needs a `gtk::Fixed`
+# Linux-only: the in-app original-page child webview needs a `gtk::Layout`
 # overlay because Tauri packs child webviews into the window's GtkBox here
 # (see page_overlay.rs). Versions/features match what tauri-runtime-wry + wry
 # already pull in, so cargo unifies them onto the crates already in the tree.

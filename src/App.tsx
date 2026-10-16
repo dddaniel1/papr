@@ -10,10 +10,11 @@ import * as api from "./api";
 import { useUi, READER_FONTS, resolveMode, systemPrefersDark } from "./store";
 import type { Palette, ResolvedMode } from "./store";
 import { useArticleActions } from "./hooks/articleActions";
+import { useViewportColumns } from "./hooks/useViewportColumns";
 import { readCurrentItems } from "./lib/currentList";
 import { checkForUpdates } from "./lib/updater";
 import { useToasts, toast as toastApi, reportError } from "./toast";
-import type { ArticleQuery, ArticleSummary, Feed } from "./types";
+import type { ArticleQuery, ArticleSummary, Feed, Folder } from "./types";
 import Sidebar from "./components/Sidebar";
 import ArticleList from "./components/ArticleList";
 import Reader from "./components/Reader";
@@ -96,6 +97,7 @@ export default function App() {
   const aiWidth = useUi((s) => s.aiWidth);
   const reduceMotion = useUi((s) => s.prefs.reduceMotion);
   const focusMode = useUi((s) => s.focusMode);
+  const articleOpen = useUi((s) => s.selectedArticleId != null);
 
   const activeToast = useToasts((s) => s.current);
   const dismissToast = useToasts((s) => s.dismiss);
@@ -110,6 +112,7 @@ export default function App() {
   // The standalone Explore (curated-directory marketplace) dialog.
   const [explore, setExplore] = useState(false);
   const [newFolder, setNewFolder] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
   // Mirror "any covering modal is open" into the store. The reader's
   // original-page view is a native child webview that floats above the whole
@@ -117,8 +120,8 @@ export default function App() {
   // reader watches this flag and tears the view down while a modal is up.
   const setModalOpen = useUi((s) => s.setModalOpen);
   useEffect(() => {
-    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder);
-  }, [cpOpen, settings.open, addFeed, explore, newFolder, setModalOpen]);
+    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder || sidebarExpanded);
+  }, [cpOpen, settings.open, addFeed, explore, newFolder, sidebarExpanded, setModalOpen]);
 
   // ── apply appearance to the document root ──
   useEffect(() => {
@@ -216,15 +219,14 @@ export default function App() {
   }, [readerFont, readerSize, readerLeading, readerWidth]);
 
   // ── apply the draggable pane widths as the grid/drawer CSS variables ──
-  // These drive `.window`'s grid columns and the AI drawer's width; the resize
-  // handles write to the store, the store persists, and this mirrors the value
-  // back onto the document root.
+  // The AI drawer's width is the stored value verbatim. The sidebar and list
+  // are different: window clamping can render them narrower than stored (see
+  // lib/layout.ts), so useViewportColumns owns those two and re-clamps them on
+  // every window resize as well.
+  useViewportColumns();
   useEffect(() => {
-    const root = document.documentElement.style;
-    root.setProperty("--col-sidebar", `${sidebarWidth}px`);
-    root.setProperty("--col-list", `${listWidth}px`);
-    root.setProperty("--ai-width", `${aiWidth}px`);
-  }, [sidebarWidth, listWidth, aiWidth]);
+    document.documentElement.style.setProperty("--ai-width", `${aiWidth}px`);
+  }, [aiWidth]);
 
   // ── toast ──
   // The store owns the queue; App owns only the dwell timer and the render.
@@ -340,6 +342,19 @@ export default function App() {
 
   const openSettings = (section?: string) => setSettings({ open: true, section });
 
+  const toggleFolders = useCallback(() => {
+    const folderList = qc.getQueryData<Folder[]>(["folders"]) ?? [];
+    if (folderList.length === 0) {
+      showToast(t("app.noFolders"), "⇧F");
+      return;
+    }
+    const nowCollapsed = useUi.getState().toggleAllFolders(folderList.map((f) => f.id));
+    showToast(
+      nowCollapsed ? t("app.allFoldersCollapsed") : t("app.allFoldersExpanded"),
+      "⇧F",
+    );
+  }, [qc, showToast, t]);
+
   // ── command-palette actions ──
   const handleCommand = (action: CommandAction) => {
     switch (action) {
@@ -355,6 +370,9 @@ export default function App() {
       case "toggle-ai":
         if (useUi.getState().selectedArticleId != null)
           useUi.getState().setAiOpen(!useUi.getState().aiOpen);
+        break;
+      case "toggle-folders":
+        toggleFolders();
         break;
       case "refresh": doRefresh(); break;
       case "add-feed": setAddFeed(true); break;
@@ -487,7 +505,15 @@ export default function App() {
             st.setAiOpen(!st.aiOpen);
           }
           break;
-        case "f": e.preventDefault(); st.setFocusMode(!st.focusMode); break;
+        case "f":
+          if (e.shiftKey) {
+            e.preventDefault();
+            toggleFolders();
+          } else {
+            e.preventDefault();
+            st.setFocusMode(!st.focusMode);
+          }
+          break;
         case "v": e.preventDefault(); st.toggleUnreadOnly(); break;
         case "a":
           if (e.shiftKey) { e.preventDefault(); markAllRead(); }
@@ -511,12 +537,12 @@ export default function App() {
     // `cpOpen` is intentionally absent — the handler only ever calls
     // setCpOpen (a functional update), so it doesn't depend on the value;
     // listing it would needlessly re-bind the listener on every ⌘K.
-  }, [qc, actions, doRefresh, markAllRead, showToast, t]);
+  }, [qc, actions, doRefresh, markAllRead, toggleFolders, showToast, t]);
 
   return (
     <>
       <div className="app-shell">
-        <div className={`window ${focusMode ? "focus" : ""}`}>
+        <div className={`window ${focusMode ? "focus" : ""} ${articleOpen ? "article-open" : ""}`}>
           <Sidebar
             onAddFeed={() => setAddFeed(true)}
             onExplore={() => setExplore(true)}
@@ -524,21 +550,27 @@ export default function App() {
             onSearchClick={() => setCpOpen(true)}
             onRefresh={doRefresh}
             refreshing={refreshing}
+            onExpandedChange={setSidebarExpanded}
             onToast={showToast}
           />
           <ArticleList onToast={showToast} />
           <Reader onToast={showToast} />
           {/* Pane resize handles. Hidden in focus mode (the sidebar + list are
-              hidden then, collapsing the grid to a single reader column). They
-              sit at the column boundaries via the `left` offset below. */}
+              hidden then, collapsing the grid to a single reader column) and,
+              for the sidebar, in a compact window, where it is an icon rail
+              with nothing to resize. They sit at the column boundaries via the
+              `left` offset below. `varName` is what keeps a window-clamped pane
+              from jumping back to its stored width when a drag starts — the
+              property always holds what is actually on screen. */}
           {!focusMode && (
             <>
               <div
-                className="resize-handle-slot"
+                className="resize-handle-slot resize-handle-slot--sidebar"
                 style={{ left: "var(--col-sidebar)" }}
               >
                 <ResizeHandle
                   width={sidebarWidth}
+                  varName="--col-sidebar"
                   side="right"
                   min={PANEL_BOUNDS.sidebar.min}
                   max={PANEL_BOUNDS.sidebar.max}
@@ -547,11 +579,12 @@ export default function App() {
                 />
               </div>
               <div
-                className="resize-handle-slot"
+                className="resize-handle-slot resize-handle-slot--list"
                 style={{ left: "calc(var(--col-sidebar) + var(--col-list))" }}
               >
                 <ResizeHandle
                   width={listWidth}
+                  varName="--col-list"
                   side="right"
                   min={PANEL_BOUNDS.list.min}
                   max={PANEL_BOUNDS.list.max}

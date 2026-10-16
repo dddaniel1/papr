@@ -136,18 +136,19 @@ export default function SettingsDialog({
           </div>
         </div>
 
+        <button
+          className="settings-close"
+          onClick={onClose}
+          title={t("settings.closeTitle")}
+          aria-label={t("settings.closeTitle")}
+        >
+          <Icon name="x" size={15} />
+        </button>
         <div className="settings-content">
           <div className="settings-header">
             <h2>{t(cur.labelKey)}</h2>
             <span className="sub">{subs[section]}</span>
           </div>
-          <button
-            className="settings-close"
-            onClick={onClose}
-            title={t("settings.closeTitle")}
-          >
-            <Icon name="x" size={15} />
-          </button>
 
           <div className="settings-scroll">
             {section === "general" && <GeneralSection />}
@@ -876,10 +877,10 @@ function SubscriptionsSection({
         }}
       />
       <div className="settings-group" style={{ marginBottom: 18 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div className="subscription-toolbar">
           <div
+            className="subscription-search"
             style={{
-              flex: 1,
               display: "flex",
               alignItems: "center",
               gap: 8,
@@ -897,6 +898,7 @@ function SubscriptionsSection({
               {...NO_AUTOCORRECT}
               style={{
                 flex: 1,
+                minWidth: 0,
                 border: 0,
                 outline: 0,
                 background: "transparent",
@@ -1273,6 +1275,7 @@ function ShortcutsSection() {
         { desc: t("settings.shortcuts.focusReading"), keys: ["F"] },
         { desc: t("settings.shortcuts.hideRead"), keys: ["V"] },
         { desc: t("settings.shortcuts.toggleTheme"), keys: ["⇧", "D"] },
+        { desc: t("settings.shortcuts.toggleFolders"), keys: ["⇧", "F"] },
       ],
     },
     {

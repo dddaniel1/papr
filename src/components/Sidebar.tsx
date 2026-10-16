@@ -24,6 +24,7 @@ interface Props {
   onRefresh: (scope?: { feedId?: number; folderId?: number }) => void;
   refreshing: boolean;
   onToast: (msg: string) => void;
+  onExpandedChange: (expanded: boolean) => void;
 }
 
 const sameQuery = (a: ArticleQuery, b: ArticleQuery) =>
@@ -69,6 +70,7 @@ function SbItem({
       role="button"
       tabIndex={0}
       aria-current={active || undefined}
+      title={label}
       onClick={onClick}
       onKeyDown={onActivate(onClick)}
     >
@@ -89,12 +91,41 @@ export default function Sidebar({
   onRefresh,
   refreshing,
   onToast,
+  onExpandedChange,
 }: Props) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const actions = useArticleActions();
   const query = useUi((s) => s.query);
-  const select = useUi((s) => s.select);
+  const selectView = useUi((s) => s.select);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => onExpandedChange(expanded), [expanded, onExpandedChange]);
+  const select = (query: ArticleQuery, label: string) => {
+    selectView(query, label);
+    setExpanded(false);
+  };
+
+  useEffect(() => {
+    if (!expanded) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopImmediatePropagation();
+        setExpanded(false);
+      }
+    };
+    const onResize = () => setExpanded(false);
+    const onOutside = (event: PointerEvent) => {
+      if (!(event.target as Element)?.closest(".sidebar")) setExpanded(false);
+    };
+    document.addEventListener("pointerdown", onOutside);
+    window.addEventListener("keydown", close, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("pointerdown", onOutside);
+      window.removeEventListener("keydown", close, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [expanded]);
   const showCounts = useUi((s) => s.prefs.showSidebarCounts);
   const unreadOnly = useUi((s) => s.prefs.sidebarUnreadOnly);
   const setPref = useUi((s) => s.setPref);
@@ -104,16 +135,10 @@ export default function Sidebar({
   const counts = useQuery({ queryKey: ["counts"], queryFn: api.smartCounts });
   const tags = useQuery({ queryKey: ["tags"], queryFn: api.listTags });
 
-  const [collapsed, setCollapsed] = useState<Record<number, boolean>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("collapsedFolders") || "{}");
-    } catch {
-      return {};
-    }
-  });
-  useEffect(() => {
-    localStorage.setItem("collapsedFolders", JSON.stringify(collapsed));
-  }, [collapsed]);
+  const collapsed = useUi((s) => s.collapsedFolders);
+  const setFolderCollapsed = useUi((s) => s.setFolderCollapsed);
+  const toggleFolderCollapsed = useUi((s) => s.toggleFolderCollapsed);
+  const toggleAllFolders = useUi((s) => s.toggleAllFolders);
 
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
@@ -203,6 +228,8 @@ export default function Sidebar({
   const allFolders = folders.data ?? [];
   const allTags = tags.data ?? [];
   const isActive = (q: ArticleQuery) => sameQuery(q, query);
+  const allCollapsed =
+    allFolders.length > 0 && allFolders.every((f) => collapsed[f.id]);
 
   // Keep the selected feed in view. Opening an article from search jumps the
   // selection to a feed that may be scrolled out of sight — or hidden inside a
@@ -223,7 +250,7 @@ export default function Sidebar({
       // scroll to yet — expand it and let this effect re-run (collapsed dep)
       // once the row is mounted.
       if (feed?.folderId != null && collapsed[feed.folderId]) {
-        setCollapsed((s) => ({ ...s, [feed.folderId!]: false }));
+        setFolderCollapsed(feed.folderId, false);
         return;
       }
     }
@@ -338,6 +365,22 @@ export default function Sidebar({
       icon: "refresh",
       label: t("sidebar.refreshFolder"),
       onClick: () => onRefresh({ folderId: folder.id }),
+    },
+    { separator: true },
+    {
+      icon: "folder",
+      label: allCollapsed
+        ? t("sidebar.expandAllFolders")
+        : t("sidebar.collapseAllFolders"),
+      shortcut: "⇧F",
+      onClick: () => {
+        const nowCollapsed = toggleAllFolders(allFolders.map((f) => f.id));
+        onToast(
+          nowCollapsed
+            ? t("app.allFoldersCollapsed")
+            : t("app.allFoldersExpanded"),
+        );
+      },
     },
     { separator: true },
     {
@@ -535,7 +578,16 @@ export default function Sidebar({
   );
 
   return (
-    <div className="sidebar" role="navigation">
+    <div className={`sidebar ${expanded ? "expanded" : ""}`} role="navigation">
+      <button
+        className="sb-expand"
+        aria-label={t(expanded ? "sidebar.collapseSidebar" : "sidebar.expandSidebar")}
+        title={t(expanded ? "sidebar.collapseSidebar" : "sidebar.expandSidebar")}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <Icon name={expanded ? "x" : "chevron-right"} size={15} />
+      </button>
       {isMac && <div className="titlebar" data-tauri-drag-region />}
 
       {isMac && (
@@ -601,6 +653,23 @@ export default function Sidebar({
             >
               <Icon name={unreadOnly ? "eye-off" : "eye"} size={12} />
             </button>
+            {allFolders.length > 0 && (
+              <button
+                className="sb-folder-all-toggle"
+                onClick={() => {
+                  const nowCollapsed = toggleAllFolders(allFolders.map((f) => f.id));
+                  onToast(
+                    nowCollapsed
+                      ? t("app.allFoldersCollapsed")
+                      : t("app.allFoldersExpanded"),
+                  );
+                }}
+                title={`${allCollapsed ? t("sidebar.expandAllFolders") : t("sidebar.collapseAllFolders")} (⇧F)`}
+                aria-label={allCollapsed ? t("sidebar.expandAllFolders") : t("sidebar.collapseAllFolders")}
+              >
+                <Icon name={allCollapsed ? "chevron-right" : "chevron-down"} size={12} />
+              </button>
+            )}
             <button
               onClick={createFolder}
               title={t("app.newFolderTitle")}
@@ -717,6 +786,7 @@ export default function Sidebar({
                   e.preventDefault();
                   setMenu({ x: e.clientX, y: e.clientY, kind: "folder", folder });
                 }}
+                title={folder.name}
               >
                 {/* The chevron is the expand/collapse affordance; clicking the
                     folder name selects the folder's combined article view. */}
@@ -729,11 +799,16 @@ export default function Sidebar({
                   aria-expanded={!isCollapsed}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setCollapsed((s) => ({ ...s, [folder.id]: !isCollapsed }));
+                    toggleFolderCollapsed(folder.id);
                   }}
                 >
                   <Icon name="chevron-down" size={11} />
                 </button>
+                {/* Folder glyph for the rail; expand the sidebar to access
+                    the folder's collapse control and full name. */}
+                <span className="sb-folder-mark" aria-hidden="true">
+                  <Icon name="folder" size={12} />
+                </span>
                 <span className="sb-folder-name">{folder.name}</span>
                 {showCounts && (isCollapsed || folderActive) && folderUnread > 0 && (
                   <span className="sb-count">{folderUnread}</span>
@@ -798,6 +873,7 @@ export default function Sidebar({
               e.preventDefault();
               setMenu({ x: e.clientX, y: e.clientY, kind: "tag", tag });
             }}
+            title={tag.name}
           >
             <span className="sb-ico">
               <span

@@ -49,9 +49,13 @@
   --shadow-modal: 0 26px 64px oklch(0.15 0.03 50 / 0.26);
   --shadow-ring: 0 0 0 1px oklch(0.15 0.03 50 / 0.05);
 
-  /* density */
-  --row-py: 14px;
-  --list-px: 18px;
+  /* density — `-base` carries the user's chosen value so a short window can
+     scale it down (see the window-size block at the end of this file) rather
+     than override the preference outright. */
+  --row-py-base: 14px;
+  --list-px-base: 18px;
+  --row-py: var(--row-py-base);
+  --list-px: var(--list-px-base);
 
   /* type — bundled variable woff2 first (see main.tsx), then platform
      fallbacks so a missing/blocked font doesn't drop to a system serif. */
@@ -292,9 +296,9 @@
   background: var(--accent);
 }
 
-[data-density="compact"] { --row-py: 10px; --list-px: 14px; }
-[data-density="cozy"]    { --row-py: 14px; --list-px: 18px; }
-[data-density="spacious"]{ --row-py: 20px; --list-px: 24px; }
+[data-density="compact"] { --row-py-base: 10px; --list-px-base: 14px; }
+[data-density="cozy"]    { --row-py-base: 14px; --list-px-base: 18px; }
+[data-density="spacious"]{ --row-py-base: 20px; --list-px-base: 24px; }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
@@ -361,7 +365,7 @@ button { font-family: inherit; }
   );
   color: var(--ink);
   display: grid;
-  grid-template-columns: var(--col-sidebar) var(--col-list) 1fr;
+  grid-template-columns: var(--col-sidebar) var(--col-list) minmax(0, 1fr);
   overflow: hidden;
   position: relative;
   transition: background .35s ease, color .25s ease;
@@ -614,8 +618,11 @@ button { font-family: inherit; }
   cursor: pointer;
   flex-shrink: 0;
 }
-.sb-folder svg { transition: transform .2s; }
-.sb-folder.collapsed svg { transform: rotate(-90deg); }
+.sb-folder-toggle svg { transition: transform .2s; }
+.sb-folder.collapsed .sb-folder-toggle svg { transform: rotate(-90deg); }
+/* Rail-only stand-in for the collapse chevron — see the compact window block
+   at the end of this file. */
+.sb-folder-mark { display: none; }
 .sb-folder .sb-folder-name {
   flex: 1;
   overflow: hidden;
@@ -1486,7 +1493,7 @@ button { font-family: inherit; }
 .window.focus .article { max-width: 720px; }
 /* In focus mode the reader is the leftmost pane, so its toolbar must clear
    the macOS traffic-light buttons — which also reveal on hover in fullscreen. */
-.window.focus .reader-toolbar {
+:root[data-platform="mac"] .window.focus .reader-toolbar {
   padding-left: 80px;
 }
 
@@ -2974,3 +2981,328 @@ button { font-family: inherit; }
 }
 .hl-export-menu .ctx-item:disabled,
 .send-to-menu .ctx-item:disabled { opacity: 0.5; cursor: default; }
+
+/* ====== Window-size adaptation ======
+   Wide windows keep the three-pane reader; compact windows fold navigation
+   into a rail, and windows below the three-pane minimum use list/detail
+   navigation. Short windows tighten the chrome without replacing the user's
+   density or reading preferences.
+
+   These rules key off `data-width-mode` / `data-height-mode` on <html>, written by
+   src/hooks/useViewportColumns.ts from the breakpoints in src/lib/layout.ts.
+   Those constants are the single source of truth — the same ones drive the
+   pane clamping, which cannot live in CSS because the column widths are inline
+   custom properties. So the thresholds are not repeated here as media queries;
+   retune them in layout.ts, not in these selectors. */
+
+:root { --rail-w: 72px; }
+
+/* ---- Narrow window: the sidebar folds to an icon rail ----
+   Everything stays reachable — smart views, folders, feeds (as their favicons)
+   and tags — and only the icons remain visible so the rail width stays
+   predictable and controlled. Labels are visually hidden rather than
+   `display: none` so each row keeps announcing its accessible name while the
+   text sits off screen. Unread/item count badges and error markers are hidden
+   to keep the rail width stable and icons centered. Feed, folder and tag rows
+   carry a `title`, so the pointer still gets a tooltip, and the row's context
+   menu is unchanged. */
+
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-brand {
+  justify-content: center;
+  margin: 19px 0 10px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search {
+  width: 36px;
+  height: 36px;
+  margin: 8px auto 12px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 9px;
+  cursor: pointer;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-scroll { padding: 4px 4px 12px; }
+
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-brand-name,
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search > span,
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search > kbd,
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-label,
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-name,
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title > span:first-child {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-item {
+  justify-content: center;
+  height: 32px;
+  padding: 0 6px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) :is(.sb-count, .sb-warn) {
+  display: none;
+}
+
+/* Section titles lose their labels, so each one becomes a hairline rule and
+   its actions drop into a small centred cluster beneath it. */
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0 6px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title::before {
+  content: "";
+  width: 20px;
+  height: 1px;
+  background: var(--hair-strong);
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-actions {
+  flex-direction: column;
+  gap: 2px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title button {
+  width: 24px;
+  height: 24px;
+  justify-content: center;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-all-toggle { display: none; }
+
+/* A collapse chevron means nothing at rail width; a folder glyph stands in, and
+   the row still selects the folder's combined view. */
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-toggle { display: none; }
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder {
+  justify-content: center;
+  padding: 8px 6px 4px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-mark { display: inline-flex; }
+
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-footer {
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+}
+
+/* The sidebar is a rail here — there is no boundary to drag. */
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .resize-handle-slot--sidebar { display: none; }
+
+/* ---- Short window: tighten the vertical rhythm ----
+   Density is a preference, so this scales the chosen row height down rather
+   than overriding it, and cuts only the fixed chrome paddings outright. */
+:root[data-height-mode="short"] {
+  --row-py: calc(var(--row-py-base) * 0.72);
+}
+:root[data-height-mode="short"] .sb-brand { margin: 12px 12px 6px; }
+:root[data-height-mode="short"] .sb-section-title { padding: 10px 10px 4px; }
+:root[data-height-mode="short"] .list-header { padding: 10px 22px 6px; }
+:root[data-height-mode="short"] .article {
+  padding-top: 18px;
+  padding-bottom: 56px;
+}
+:root[data-height-mode="short"] .settings-header { padding: 14px 28px 10px; }
+/* The macOS overlay title bar's strip can shrink with it, since the traffic
+   lights are the only thing under it. */
+:root[data-platform="mac"][data-height-mode="short"] .sidebar { padding-top: 30px; }
+:root[data-platform="mac"][data-height-mode="short"] .list-header { padding-top: 30px; }
+
+/* Wide windows retain the chosen reading measure; extra space becomes margin. */
+
+
+/* ====== Per-pane trade-offs ======
+   A pane's width is not the window's width. The reader column is at its
+   narrowest exactly when the list has been dragged wide, and a tiling window
+   manager hands the app widths no breakpoint predicts — so the panes answer
+   for themselves instead of for the viewport. Each is a container, and each
+   gives up the least useful thing it has, in that order, as it runs out of
+   room. Nothing here is a device check: it is the width the pane actually
+   got. */
+
+.list {
+  container: list / inline-size;
+}
+.reader {
+  container: reader / inline-size;
+}
+
+/* --- The list gives up its words before its controls ---
+   The header carries two rows of secondary controls — sort, unread filter,
+   mark-all, and the translate mode. In a narrow list the labels are the thing
+   to lose, not the buttons: they collapse to icons that keep their tooltip,
+   their pressed state and their accessible name (visually hidden, not
+   `display: none`, so they stay in the tree). */
+@container list (max-width: 400px) {
+  .list-meta-btn .lbl,
+  .list-translate-btn .lbl {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .list-meta-btn,
+  .list-translate-btn {
+    padding: 4px 7px;
+    gap: 0;
+  }
+  .list-meta { gap: 2px; }
+}
+
+/* --- The reader gives up its gutters ---
+   The article's 56px-a-side gutters are a quarter of a 460px reader, and the
+   text measure is the one thing worth defending on a reading surface, so the
+   margins go first. They step down rather than vanish: the page keeps a
+   margin at every width. */
+@container reader (max-width: 560px) {
+  .article { padding-inline: 26px; }
+}
+@container reader (max-width: 430px) {
+  .article { padding-inline: 18px; }
+  /* The toolbar is a fixed row of buttons; shave its gutters and inter-button
+     gaps before any of them have to leave. */
+  .reader-toolbar { padding-inline: 8px; gap: 0; }
+  .article-body pre,
+  .article-body blockquote { margin-inline: -10px; padding-inline: 14px; }
+}
+
+
+/* Keep intrinsic feed/author/table widths inside their own pane. */
+.sidebar, .list, .reader { min-width: 0; }
+.window > .sidebar { grid-column: 1; grid-row: 1; }
+.window > .list { grid-column: 2; grid-row: 1; }
+.window > .reader { grid-column: 3; grid-row: 1; }
+.window.focus > .reader { grid-column: 1 / -1; }
+.app-shell { height: 100dvh; }
+.list-title-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.list-title-meta { flex-shrink: 0; }
+.reader-toolbar { overflow-x: auto; height: 38px; padding-block: 3px; }
+.tb-btn { flex-shrink: 0; }
+.tb-btn.spacer { min-width: 0; width: 0; }
+.reader-back, .sb-expand { display: none; }
+.reader-back-icon { display: inline-flex; transform: rotate(180deg); }
+:root[data-platform="other"] .reader-loading-toolbar { display: none; }
+.article-feed { max-width: 100%; text-align: start; overflow-wrap: anywhere; }
+.article-meta .author { white-space: normal; overflow-wrap: anywhere; }
+.article-body table, .ai-prose table { display: block; max-width: 100%; overflow-x: auto; }
+.ai-prose pre { max-width: 100%; overflow-x: auto; }
+.ai-drawer { max-width: 100%; }
+
+/* The rail can open over the list to reveal names and folder controls. */
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sb-expand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 30px;
+  margin: 0 auto 2px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  order: -1;
+}
+.sb-expand:hover { background: var(--hover); color: var(--ink); }
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar.expanded {
+  position: absolute;
+  grid-column: 1 / -1;
+  inset: 0 auto 0 0;
+  width: min(280px, 100%);
+  z-index: 12;
+  box-shadow: var(--shadow-modal);
+}
+.sidebar.expanded .sb-expand { margin-right: 12px; }
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-scroll > div[style] {
+  overflow-wrap: anywhere;
+  padding-inline: 4px !important;
+}
+
+/* Below the three-pane minimum, reading becomes a list/detail flow.
+   Keep the virtual list measured underneath so returning retains its position. */
+[data-width-mode="narrow"] .window {
+  grid-template-columns: var(--col-sidebar) minmax(0, 1fr);
+}
+[data-width-mode="narrow"] .window.article-open > .list { visibility: hidden; }
+[data-width-mode="narrow"] .window > .reader { display: none; }
+[data-width-mode="narrow"] .window:is(.article-open, .focus) > .reader {
+  display: flex;
+  position: absolute;
+  grid-column: 1 / -1;
+  inset: 0 0 0 var(--col-sidebar);
+  z-index: 10;
+}
+[data-width-mode="narrow"] .window.focus > .reader { left: 0; }
+[data-width-mode="narrow"] .window.focus > .sidebar,
+[data-width-mode="narrow"] .window.focus > .list { visibility: hidden; }
+[data-width-mode="narrow"] .resize-handle-slot--list { display: none; }
+[data-width-mode="narrow"] .reader-back { display: inline-flex; }
+:root[data-width-mode="narrow"] .reader-loading-toolbar { display: flex; }
+
+/* Dialogs use their own available width, independent of the reader layout. */
+.settings-content { container: settings / inline-size; }
+.settings-sidebar { min-height: 0; overflow-y: auto; }
+.subscription-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.subscription-search { min-width: 0; flex: 1 1 160px; }
+.s-feed-row { flex-wrap: wrap; }
+.s-feed-row .name { min-width: 0; flex-shrink: 1; }
+.s-feed-row .actions { flex-wrap: wrap; max-width: 100%; }
+@container settings (max-width: 600px) {
+  .settings-header { padding-inline: 20px; }
+  .settings-scroll { padding-inline: 20px; }
+  .settings-row { flex-wrap: wrap; gap: 10px 16px; }
+  .settings-row-text { flex-basis: 200px; }
+  .settings-row-control { max-width: 100%; flex-wrap: wrap; }
+  .settings-row-control input, .settings-row-control select { max-width: 100%; }
+  .subscription-search { flex-basis: 100%; }
+  .s-feed-row .actions { width: 100%; }
+  .s-shortcuts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .settings-window { grid-template-columns: 168px minmax(0, 1fr); }
+  .settings-sidebar { padding-inline: 6px; }
+  .settings-nav-item { gap: 6px; padding-inline: 8px; }
+}
+@media (max-width: 600px) {
+  .settings-window { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-sidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    align-items: center;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--hair);
+    padding-right: 48px;
+  }
+  .settings-sidebar-title, .settings-nav-spacer, .settings-version { display: none; }
+  .settings-nav-item { flex-shrink: 0; white-space: nowrap; }
+  .settings-close { top: 10px; right: 10px; background: var(--panel); }
+  .settings-header { padding-right: 52px; }
+  .settings-header .sub { padding-right: 0; }
+  .explore-grid { grid-template-columns: minmax(0, 1fr); }
+  .explore-footer { flex-wrap: wrap; }
+  .explore-footer .s-select { max-width: 100%; }
+  .player-bar { flex-wrap: wrap; height: auto; min-height: 56px; padding-block: 8px; gap: 6px; }
+  .player-meta { flex: 1; width: auto; }
+  .player-scrub { flex-basis: 100%; order: 1; }
+  .player-error { flex-basis: 100%; order: 1; }
+}
+.modal { max-height: calc(100dvh - 32px); overflow-y: auto; }
+.modal-input { min-width: 0; }
+.modal-actions { flex-wrap: wrap; }
+.cp { max-height: calc(86dvh - 16px); display: flex; flex-direction: column; }
+.cp-input, .cp-footer { flex-shrink: 0; }
+.cp-input input { min-width: 0; }
+.cp-list { min-height: 0; }
+.cp-footer { flex-wrap: wrap; }
+.ctx-menu, .tag-picker, .hl-popover { max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; }
+
+@container reader (max-width: 430px) {
+  .article-title { font-size: 30px; line-height: 1.16; }
+}

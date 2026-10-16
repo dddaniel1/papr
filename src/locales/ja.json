@@ -111,7 +111,10 @@
     "readLaterRemoved": "あとで読むから削除",
     "newFolderTitle": "新規フォルダ",
     "folderNamePlaceholder": "フォルダ名",
-    "folderCreated": "フォルダを作成しました"
+    "folderCreated": "フォルダを作成しました",
+    "allFoldersExpanded": "すべてのフォルダを展開しました",
+    "allFoldersCollapsed": "すべてのフォルダを折りたたみました",
+    "noFolders": "フォルダがありません"
   },
   "articleList": {
     "markedReadToast": "{{count}} 件を既読にしました",
@@ -148,6 +151,7 @@
     "actionToggleTheme": "ダーク / ライトテーマ切替",
     "actionToggleFocus": "集中モード",
     "actionToggleAi": "現在の記事をAI要約",
+    "actionToggleFolders": "すべてのフォルダを展開 / 折りたたむ",
     "actionRefresh": "すべてのフィードを更新",
     "actionAddFeed": "フィードを追加…",
     "actionNewFolder": "新規フォルダ…",
@@ -166,6 +170,7 @@
     "footerHint": "記事 · フィード · コマンド"
   },
   "reader": {
+    "backToList": "記事一覧に戻る",
     "resizeAi": "AI 要約パネルの幅を調整",
     "fullTextExtracted": "全文を抽出しました",
     "linkCopied": "リンクをコピーしました",
@@ -427,6 +432,7 @@
       "focusReading": "集中して読む",
       "hideRead": "既読を非表示",
       "toggleTheme": "ダーク / ライトを切り替え",
+      "toggleFolders": "すべてのフォルダを展開 / 折りたたむ",
       "global": "全体",
       "commandPalette": "コマンドパレット",
       "refreshAll": "すべてのフィードを更新",
@@ -533,6 +539,8 @@
     }
   },
   "sidebar": {
+    "expandSidebar": "サイドバーを展開",
+    "collapseSidebar": "サイドバーを折りたたむ",
     "searchArticles": "記事を検索",
     "library": "ライブラリ",
     "feeds": "フィード",
@@ -557,6 +565,8 @@
     "refreshFolder": "このフォルダを更新",
     "expandFolder": "フォルダを展開",
     "collapseFolder": "フォルダを折りたたむ",
+    "expandAllFolders": "すべてのフォルダを展開",
+    "collapseAllFolders": "すべてのフォルダを折りたたむ",
     "addFeedShortcut": "フィードを追加 (A)",
     "refreshAll": "すべて更新 (⌘R)",
     "explore": "フィードを見つける",

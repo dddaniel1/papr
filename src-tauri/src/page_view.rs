@@ -32,7 +32,7 @@ fn parse_url(url: &str) -> Result<url::Url, String> {
 
 /// Apply a rectangle to an open page view. On macOS/Windows this is the native
 /// `set_position` / `set_size`; on Linux those are no-ops for a child webview,
-/// so we drive the GTK overlay's `Fixed::move_` + size request instead
+/// so we drive the GTK overlay's `Layout::move_` + size request instead
 /// (page_overlay.rs).
 #[cfg(not(target_os = "linux"))]
 fn apply_bounds(
@@ -85,7 +85,7 @@ pub async fn open_page_view(
         .add_child(builder, position, size)
         .map_err(|e| e.to_string())?;
     // Linux: the child landed in the window's GtkBox (stacked) — move it onto
-    // the overlay Fixed so it actually floats over the reader. macOS/Windows
+    // the overlay Layout so it actually floats over the reader. macOS/Windows
     // already placed it correctly at creation, so nothing more to do.
     #[cfg(target_os = "linux")]
     crate::page_overlay::attach_child(&view, x, y, width, height);

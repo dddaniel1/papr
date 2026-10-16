@@ -454,11 +454,13 @@ export default function ArticleList({ onToast }: Props) {
       <div className="list-header" {...(isMac && { "data-tauri-drag-region": true })}>
         <h1 className="list-title" id="article-list-title">
           {/* Smart views re-translate live; feed/folder/tag keep their own title. */}
-          {query.kind === "feed" ||
-          query.kind === "folder" ||
-          query.kind === "tag"
-            ? queryLabel
-            : t(`smart.${query.kind}`)}
+          <span className="list-title-label" title={queryLabel}>
+            {query.kind === "feed" ||
+            query.kind === "folder" ||
+            query.kind === "tag"
+              ? queryLabel
+              : t(`smart.${query.kind}`)}
+          </span>
           <span className="list-title-meta">
             <span className="count">
               {browse.isLoading ? t("common.loading") : showCount}
@@ -478,7 +480,7 @@ export default function ArticleList({ onToast }: Props) {
                 onClick={() => setListTranslateMode("off")}
               >
                 <Icon name="text" size={11} />
-                {t("articleList.translateOffShort")}
+                <span className="lbl">{t("articleList.translateOffShort")}</span>
               </button>
               <button
                 className={`list-translate-btn ${
@@ -490,7 +492,7 @@ export default function ArticleList({ onToast }: Props) {
                 onClick={() => setListTranslateMode("auto")}
               >
                 <Icon name="sparkle" size={11} />
-                {t("articleList.translateAutoShort")}
+                <span className="lbl">{t("articleList.translateAutoShort")}</span>
               </button>
             </span>
           </span>
@@ -502,7 +504,9 @@ export default function ArticleList({ onToast }: Props) {
             title={t("articleList.sort")}
           >
             <Icon name={sortOldest ? "arrow-up" : "arrow-down"} size={12} />
-            {sortOldest ? t("articleList.oldestFirst") : t("articleList.newestFirst")}
+            <span className="lbl">
+              {sortOldest ? t("articleList.oldestFirst") : t("articleList.newestFirst")}
+            </span>
           </button>
           <button
             className={`list-meta-btn ${unreadOnly ? "on" : ""}`}
@@ -510,7 +514,9 @@ export default function ArticleList({ onToast }: Props) {
             title={t("articleList.hideRead")}
           >
             <Icon name={unreadOnly ? "eye-off" : "eye"} size={12} />
-            {unreadOnly ? t("articleList.unreadOnly") : t("smart.all")}
+            <span className="lbl">
+              {unreadOnly ? t("articleList.unreadOnly") : t("smart.all")}
+            </span>
           </button>
           <div style={{ flex: 1 }} />
           <button
@@ -519,7 +525,7 @@ export default function ArticleList({ onToast }: Props) {
             title={t("articleList.markAllRead")}
           >
             <Icon name="check-all" size={12} />
-            {t("articleList.markRead")}
+            <span className="lbl">{t("articleList.markRead")}</span>
           </button>
         </div>
       </div>

@@ -169,6 +169,7 @@ interface UiState {
   // transient view modes
   focusMode: boolean;
   aiOpen: boolean;
+  collapsedFolders: Record<number, boolean>;
   /** A covering modal (subscribe / settings / explore …) is open. The reader's
    *  original-page view is a native child webview that floats above the whole
    *  DOM — including modals — so it must be torn down while one is up, or it
@@ -185,6 +186,9 @@ interface UiState {
   toggleUnreadOnly: () => void;
   toggleSort: () => void;
   setListAnchor: (offset: number) => void;
+  setFolderCollapsed: (id: number, collapsed: boolean) => void;
+  toggleFolderCollapsed: (id: number) => void;
+  toggleAllFolders: (folderIds: number[]) => boolean;
 
   setPalette: (p: Palette) => void;
   setMode: (m: Mode) => void;
@@ -279,6 +283,14 @@ function loadPrefs(): Prefs {
   };
 }
 
+const loadCollapsedFolders = (): Record<number, boolean> => {
+  try {
+    return JSON.parse(localStorage.getItem("collapsedFolders") || "{}");
+  } catch {
+    return {};
+  }
+};
+
 export const useUi = create<UiState>((set, get) => ({
   query: { kind: "all" },
   queryLabel: i18n.t("smart.all"),
@@ -316,6 +328,7 @@ export const useUi = create<UiState>((set, get) => ({
 
   focusMode: false,
   aiOpen: false,
+  collapsedFolders: loadCollapsedFolders(),
   modalOpen: false,
   menuOpen: false,
 
@@ -331,6 +344,31 @@ export const useUi = create<UiState>((set, get) => ({
   toggleUnreadOnly: () => set((s) => ({ unreadOnly: !s.unreadOnly, listAnchor: 0 })),
   toggleSort: () => set((s) => ({ sortOldest: !s.sortOldest, listAnchor: 0 })),
   setListAnchor: (listAnchor) => set({ listAnchor }),
+  setFolderCollapsed: (id, collapsed) =>
+    set((s) => {
+      const next = { ...s.collapsedFolders, [id]: collapsed };
+      localStorage.setItem("collapsedFolders", JSON.stringify(next));
+      return { collapsedFolders: next };
+    }),
+  toggleFolderCollapsed: (id) =>
+    set((s) => {
+      const next = { ...s.collapsedFolders, [id]: !s.collapsedFolders[id] };
+      localStorage.setItem("collapsedFolders", JSON.stringify(next));
+      return { collapsedFolders: next };
+    }),
+  toggleAllFolders: (folderIds) => {
+    const s = get();
+    const allCollapsed =
+      folderIds.length > 0 && folderIds.every((id) => s.collapsedFolders[id]);
+    const nextCollapsed = !allCollapsed;
+    const next: Record<number, boolean> = {};
+    for (const id of folderIds) {
+      next[id] = nextCollapsed;
+    }
+    localStorage.setItem("collapsedFolders", JSON.stringify(next));
+    set({ collapsedFolders: next });
+    return nextCollapsed;
+  },
 
   setPalette: (palette) => { ls.set("palette", palette); mirrorAppearance(palette, get().mode); set({ palette }); },
   setMode: (mode) => { ls.set("mode", mode); mirrorAppearance(get().palette, mode); set({ mode }); },
