@@ -1019,6 +1019,8 @@ async fn cmd_refresh(
     let summary = refresh::refresh_core(&dbm, &client, scope, |event| {
         use papr_core::models::RefreshProgress::*;
         match event {
+            Skipped => eprintln!("refresh already in progress"),
+            SyncFailed { error } => eprintln!("sync failed: {error}"),
             Started { total } => eprintln!("refreshing {total} feed(s)…"),
             FeedDone { feed_id, new_articles, error } => {
                 if let Some(e) = error {

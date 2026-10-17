@@ -1314,68 +1314,37 @@ function AIDrawer({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
-  // Identifies the latest summarize run. Closing the drawer mid-stream cancels
-  // an effect run but the component stays mounted (it is only moved off-screen),
-  // so the underlying request keeps streaming and its promise settles later.
-  // Only the run whose generation still matches may touch `busy` on settle —
-  // otherwise a stale run's `finally` would either wedge the drawer on the
-  // loading state or clobber a newer run's `busy` flag.
   const runRef = useRef(0);
+  useEffect(() => () => { ++runRef.current; }, []);
 
-  // Generate a summary the first time the drawer opens for an article, and
-  // again whenever the user hits Retry. `failed` is in the guard so a failed
-  // run isn't silently re-attempted just because the drawer was reopened.
   useEffect(() => {
     if (!open || busy || text || failed) return;
     const run = ++runRef.current;
-    let cancelled = false;
-    // Whether the stream settled (resolved or rejected) on its own. If the
-    // cleanup runs while this is still false, the drawer was closed mid-stream
-    // — the accumulated `text` is then a truncated fragment.
-    let settled = false;
-    // An error raised inside the stream surfaces twice: once as an `error`
-    // channel event (carrying the precise provider message) and again as the
-    // command's rejected promise. Toast only the first so the user does not
-    // see the same failure reported twice; the `.catch` still toasts for
-    // failures that abort before streaming starts (no key, bad config) and so
-    // never emit an `error` event.
     let sawErrorEvent = false;
     setBusy(true);
     setText("");
-    api
-      .aiSummarize(article.id, (ev) => {
-        if (cancelled) return;
-        if (ev.type === "delta") setText((s) => (s ?? "") + ev.data);
-        else if (ev.type === "error") {
-          sawErrorEvent = true;
-          setFailed(true);
-          toast.error(ev.data);
-        }
-      })
+    // Hiding the drawer keeps this request alive: reopening resumes the same
+    // summary without another provider request or a blank intermediate state.
+    api.aiSummarize(article.id, (ev) => {
+      if (runRef.current !== run) return;
+      if (ev.type === "delta") setText((s) => (s ?? "") + ev.data);
+      else if (ev.type === "error") {
+        sawErrorEvent = true;
+        setFailed(true);
+        toast.error(ev.data);
+      }
+    })
       .then(() => {
-        if (!cancelled) qc.invalidateQueries({ queryKey: ["article", article.id] });
+        qc.invalidateQueries({ queryKey: ["article", article.id] });
       })
       .catch((e) => {
-        if (!cancelled && !sawErrorEvent) {
+        if (runRef.current === run && !sawErrorEvent) {
           setFailed(true);
           reportError(e);
         }
       })
-      .finally(() => {
-        settled = true;
-        // Clear `busy` for the current run even if it was cancelled — the
-        // component is still mounted, and leaving `busy` true would wedge the
-        // drawer on the loading state. Skip if a newer run has superseded us.
-        if (runRef.current === run) setBusy(false);
-      });
-    return () => {
-      cancelled = true;
-      // Closed mid-stream: the backend discards an interrupted generation
-      // (it is never persisted), so drop the partial fragment held here too.
-      // Reopening then re-generates from scratch instead of showing — and
-      // permanently freezing on — a truncated half-summary.
-      if (!settled) setText(article.aiSummary);
-    };
+      .finally(() => { if (runRef.current === run) setBusy(false); });
+    // Busy/text are guards, not triggers: a stream delta must not start a run.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, article.id, retry]);
 

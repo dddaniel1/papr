@@ -37,6 +37,10 @@ export function useFocusTrap(
     if (!enabled) return;
     const el = ref.current;
     if (!el) return;
+    const previous = document.activeElement as HTMLElement | null;
+    if (!el.contains(previous)) {
+      Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE)).find(isVisible)?.focus();
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Tab") return;
       // Only visible elements can take focus — a hidden match (the dialog's
@@ -56,6 +60,9 @@ export function useFocusTrap(
       }
     };
     el.addEventListener("keydown", onKey);
-    return () => el.removeEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("keydown", onKey);
+      if (previous?.isConnected && !el.contains(previous)) previous.focus();
+    };
   }, [ref, enabled]);
 }

@@ -79,7 +79,8 @@ export default function SettingsDialog({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        e.stopPropagation();
+        if (windowRef.current?.querySelector('[role="alertdialog"], .modal-backdrop')) return;
+        e.stopImmediatePropagation();
         onClose();
       }
     };
@@ -119,8 +120,10 @@ export default function SettingsDialog({
             <span className="badge">{modCombo(",")}</span>
           </div>
           {SECTIONS.map((s) => (
-            <div
+            <button
+              type="button"
               key={s.id}
+              aria-current={section === s.id ? "page" : undefined}
               className={`settings-nav-item ${section === s.id ? "active" : ""}`}
               onClick={() => setSection(s.id)}
             >
@@ -128,7 +131,7 @@ export default function SettingsDialog({
                 <Icon name={s.icon} size={15} />
               </span>
               {t(s.labelKey)}
-            </div>
+            </button>
           ))}
           <div className="settings-nav-spacer" />
           <div className="settings-version">
@@ -208,9 +211,11 @@ function Row({
 function Toggle({
   checked,
   onChange,
+  disabled,
   "aria-label": ariaLabel,
 }: {
   checked: boolean;
+  disabled?: boolean;
   onChange: (v: boolean) => void;
   "aria-label"?: string;
 }) {
@@ -219,6 +224,7 @@ function Toggle({
       type="checkbox"
       className="s-toggle"
       checked={checked}
+      disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.checked)}
     />
@@ -229,9 +235,11 @@ function Select<T extends string>({
   value,
   options,
   onChange,
+  disabled,
   "aria-label": ariaLabel,
 }: {
   value: T;
+  disabled?: boolean;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
   "aria-label"?: string;
@@ -240,6 +248,7 @@ function Select<T extends string>({
     <select
       className="s-select"
       value={value}
+      disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value as T)}
     >
@@ -310,16 +319,25 @@ function Slider({
   onChange?: (v: number) => void;
   /** Fires once the drag/keypress settles — for costly side effects (a backend
    *  write, an HTTP-client rebuild) that must not run ~20× across one drag. */
-  onCommit?: (v: number) => void;
+  onCommit?: (v: number) => void | Promise<void>;
   "aria-label"?: string;
 }) {
   const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const commit = async (next: number) => {
+    if (!onCommit || saving) return;
+    setSaving(true);
+    try { await onCommit(next); }
+    catch (e) { setDraft(value); reportError(e); }
+    finally { setSaving(false); }
+  };
   // Follow external changes (async settings load, reset) when not mid-drag.
   useEffect(() => setDraft(value), [value]);
   return (
     <>
       <input
         type="range"
+        disabled={saving}
         className="s-slider"
         min={min}
         max={max}
@@ -333,13 +351,13 @@ function Slider({
           onChange?.(v);
         }}
         onPointerUp={(e) =>
-          onCommit?.(Number((e.target as HTMLInputElement).value))
+          void commit(Number((e.target as HTMLInputElement).value))
         }
         onKeyUp={(e) => {
           // Only a key that can move the slider commits — a bare keyup from
           // Tab / Shift / a modifier never changed the value.
           if (SLIDER_KEYS.has(e.key)) {
-            onCommit?.(Number((e.target as HTMLInputElement).value));
+            void commit(Number((e.target as HTMLInputElement).value));
           }
         }}
       />
@@ -366,22 +384,28 @@ function SettingFlag({
   onChanged?: (v: boolean) => void;
 }) {
   const [val, setVal] = useState(fallback);
+  const [busy, setBusy] = useState(true);
   useEffect(() => {
     api
       .getSetting(settingKey)
       .then((v) => {
         if (v != null && v !== "") setVal(v === "1");
       })
-      .catch(() => {});
+      .catch(reportError)
+      .finally(() => setBusy(false));
   }, [settingKey]);
-  const change = (v: boolean) => {
-    setVal(v);
-    api.setSetting(settingKey, v ? "1" : "0").catch(() => {});
-    onChanged?.(v);
+  const change = async (v: boolean) => {
+    setBusy(true);
+    try {
+      await api.setSetting(settingKey, v ? "1" : "0");
+      setVal(v);
+      onChanged?.(v);
+    } catch (e) { reportError(e); }
+    finally { setBusy(false); }
   };
   return (
     <Row label={label} desc={desc}>
-      <Toggle checked={val} onChange={change} />
+      <Toggle checked={val} disabled={busy} onChange={change} />
     </Row>
   );
 }
@@ -398,7 +422,7 @@ function LaunchAtLogin() {
   const { t } = useTranslation();
   const [on, setOn] = useState(false);
   useEffect(() => {
-    isEnabled().then(setOn).catch(() => {});
+    isEnabled().then(setOn).catch(reportError);
   }, []);
   const change = async (v: boolean) => {
     try {
@@ -461,13 +485,17 @@ function GeneralSection() {
           setRefreshMins(clampSetting(v ?? null, 30, 5, 120));
         }
       })
-      .catch(() => {});
+      .catch(reportError);
   }, []);
 
-  const writeInterval = (auto: boolean, mins: number) => {
-    api
-      .setSetting("refresh_interval_min", auto ? String(mins) : String(OFF_INTERVAL))
-      .catch(() => {});
+  const [savingInterval, setSavingInterval] = useState(false);
+  const writeInterval = async (auto: boolean, mins: number) => {
+    setSavingInterval(true);
+    try {
+      await api.setSetting("refresh_interval_min", auto ? String(mins) : String(OFF_INTERVAL));
+      setAutoRefresh(auto);
+      setRefreshMins(mins);
+    } finally { setSavingInterval(false); }
   };
 
   return (
@@ -480,10 +508,8 @@ function GeneralSection() {
         >
           <Toggle
             checked={autoRefresh}
-            onChange={(v) => {
-              setAutoRefresh(v);
-              writeInterval(v, refreshMins);
-            }}
+            disabled={savingInterval}
+            onChange={(v) => { void writeInterval(v, refreshMins).catch(reportError); }}
           />
         </Row>
         {autoRefresh && (
@@ -497,7 +523,6 @@ function GeneralSection() {
               max={120}
               step={5}
               unit={t("settings.general.minutesUnit")}
-              onChange={setRefreshMins}
               onCommit={(m) => writeInterval(true, m)}
             />
           </Row>
@@ -990,16 +1015,27 @@ function SubscriptionsSection({
 function RsshubInstanceGroup() {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
+  const saved = useRef("");
+  const [busy, setBusy] = useState(true);
 
   useEffect(() => {
     api
       .getSetting("rsshub_instance")
-      .then((v) => setValue(v ?? ""))
-      .catch(() => {});
+      .then((v) => { saved.current = v ?? ""; setValue(saved.current); })
+      .catch(reportError)
+      .finally(() => setBusy(false));
   }, []);
 
-  const commit = () => {
-    api.setSetting("rsshub_instance", value.trim()).catch(() => {});
+  const commit = async () => {
+    const next = value.trim();
+    if (next === saved.current) return;
+    setBusy(true);
+    try {
+      await api.setSetting("rsshub_instance", next);
+      saved.current = next;
+      setValue(next);
+    } catch (e) { setValue(saved.current); reportError(e); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -1013,6 +1049,7 @@ function RsshubInstanceGroup() {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onBlur={commit}
+          disabled={busy}
           onKeyDown={(e) => {
             if (e.key === "Enter") e.currentTarget.blur();
           }}
@@ -1388,7 +1425,7 @@ function StorageGroup({ onToast }: { onToast: (m: string) => void }) {
       .then((v) => {
         if (v) setRetention(v);
       })
-      .catch(() => {});
+      .catch(reportError);
   }, []);
 
   const cleanup = async () => {
@@ -1447,6 +1484,7 @@ function StorageGroup({ onToast }: { onToast: (m: string) => void }) {
       >
         <Select
           value={retention}
+          disabled={busy}
           options={[
             { value: "30", label: t("settings.advanced.retention30") },
             { value: "90", label: t("settings.advanced.retention90") },
@@ -1454,8 +1492,11 @@ function StorageGroup({ onToast }: { onToast: (m: string) => void }) {
             { value: "forever", label: t("settings.advanced.retentionForever") },
           ]}
           onChange={(v) => {
-            setRetention(v);
-            api.setSetting("retention_days", v).catch(() => {});
+            setBusy(true);
+            api.setSetting("retention_days", v)
+              .then(() => setRetention(v))
+              .catch(reportError)
+              .finally(() => setBusy(false));
           }}
         />
       </Row>
@@ -1484,6 +1525,8 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
   const { t } = useTranslation();
   const [proxy, setProxy] = useState("system");
   const [customProxy, setCustomProxy] = useState("");
+  const savedProxy = useRef("system");
+  const [proxyBusy, setProxyBusy] = useState(true);
   const [concurrency, setConcurrency] = useState(6);
   const [timeoutSec, setTimeoutSec] = useState(30);
 
@@ -1494,6 +1537,7 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
       api.getSetting("net_timeout_sec"),
     ])
       .then(([p, c, t]) => {
+        savedProxy.current = p || "system";
         if (p === "system" || p === "none") setProxy(p);
         else if (p) {
           setProxy("custom");
@@ -1504,16 +1548,28 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
         if (c) setConcurrency(clampSetting(c, 6, 1, 16));
         if (t) setTimeoutSec(clampSetting(t, 30, 5, 120));
       })
-      .catch(() => {});
+      .catch(reportError)
+      .finally(() => setProxyBusy(false));
   }, []);
 
-  const saveProxy = (mode: string, custom: string) => {
-    const value = mode === "custom" ? custom : mode;
-    api
-      .setSetting("net_proxy", value)
-      .then(() => api.applyNetworkSettings())
-      .then(() => onToast(t("settings.advanced.proxyApplied")))
-      .catch((e) => reportError(e));
+  const saveProxy = async (mode: string, custom: string) => {
+    const value = mode === "custom" ? custom.trim() : mode;
+    setProxyBusy(true);
+    try {
+      await api.setSetting("net_proxy", value);
+      await api.applyNetworkSettings();
+      savedProxy.current = value;
+      setProxy(mode);
+      if (mode === "custom") setCustomProxy(value);
+      onToast(t("settings.advanced.proxyApplied"));
+    } catch (e) {
+      const saved = savedProxy.current;
+      setProxy(saved === "system" || saved === "none" ? saved : "custom");
+      setCustomProxy(saved === "system" || saved === "none" ? "" : saved);
+      try { await api.setSetting("net_proxy", saved); }
+      catch (rollbackError) { reportError(rollbackError); }
+      reportError(e);
+    } finally { setProxyBusy(false); }
   };
 
   return (
@@ -1522,6 +1578,7 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
       <Row label={t("settings.advanced.proxy")}>
         <Select
           value={proxy}
+          disabled={proxyBusy}
           options={[
             { value: "system", label: t("settings.advanced.proxySystem") },
             { value: "none", label: t("settings.advanced.proxyNone") },
@@ -1529,7 +1586,7 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
           ]}
           onChange={(v) => {
             setProxy(v);
-            if (v !== "custom") saveProxy(v, "");
+            if (v !== "custom") void saveProxy(v, "");
           }}
         />
       </Row>
@@ -1542,6 +1599,7 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
             className="s-text-input"
             {...NO_AUTOCORRECT}
             value={customProxy}
+            disabled={proxyBusy}
             placeholder="http://host:port"
             onChange={(e) => setCustomProxy(e.target.value)}
             onBlur={() => saveProxy("custom", customProxy)}
@@ -1556,10 +1614,10 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
           value={concurrency}
           min={1}
           max={16}
-          onChange={setConcurrency}
-          onCommit={(v) =>
-            api.setSetting("net_concurrency", String(v)).catch(() => {})
-          }
+          onCommit={async (v) => {
+            await api.setSetting("net_concurrency", String(v));
+            setConcurrency(v);
+          }}
         />
       </Row>
       <Row label={t("settings.advanced.timeout")}>
@@ -1569,13 +1627,16 @@ function NetworkGroup({ onToast }: { onToast: (m: string) => void }) {
           max={120}
           step={5}
           unit={t("settings.advanced.secondsUnit")}
-          onChange={setTimeoutSec}
-          onCommit={(v) =>
-            api
-              .setSetting("net_timeout_sec", String(v))
-              .then(() => api.applyNetworkSettings())
-              .catch(() => {})
-          }
+          onCommit={async (v) => {
+            try {
+              await api.setSetting("net_timeout_sec", String(v));
+              await api.applyNetworkSettings();
+              setTimeoutSec(v);
+            } catch (e) {
+              await api.setSetting("net_timeout_sec", String(timeoutSec));
+              throw e;
+            }
+          }}
         />
       </Row>
     </div>
@@ -1832,11 +1893,10 @@ function AiSettingsGroup({ onToast }: { onToast: (m: string) => void }) {
       .finally(() => { switching.current = false; setProfileBusy(false); });
   }, []);
 
-  const save = (key: string, value: string, label: string) => {
-    api
-      .setSetting(key, value)
-      .then(() => onToast(t("settings.advanced.aiSaved", { label })))
-      .catch((e) => reportError(e));
+  const save = async (key: string, value: string, label: string) => {
+    await api.setSetting(key, value);
+    qc.setQueryData(["setting", key], value);
+    onToast(t("settings.advanced.aiSaved", { label }));
   };
 
   const placeholder =
@@ -1888,8 +1948,9 @@ function AiSettingsGroup({ onToast }: { onToast: (m: string) => void }) {
             const trimmed = apiKey.trim();
             if (trimmed !== apiKey) setApiKey(trimmed);
             if (trimmed !== savedKey.current) {
-              savedKey.current = trimmed;
-              save("ai_api_key", trimmed, t("settings.advanced.aiApiKeyLabel"));
+              void save("ai_api_key", trimmed, t("settings.advanced.aiApiKeyLabel"))
+                .then(() => { savedKey.current = trimmed; })
+                .catch((e) => { setApiKey(savedKey.current); reportError(e); });
             }
           }}
         />
@@ -1978,11 +2039,9 @@ function AiSettingsGroup({ onToast }: { onToast: (m: string) => void }) {
           ]}
           aria-label={t("settings.advanced.translateEngine")}
           onChange={(v) => {
-            setEngine(v);
-            save("translate_engine", v, t("settings.advanced.translateEngineLabel"));
-            // The reader reads this default when starting a translation —
-            // refresh it so the change takes effect on the next translate.
-            qc.invalidateQueries({ queryKey: ["setting", "translate_engine"] });
+            void save("translate_engine", v, t("settings.advanced.translateEngineLabel"))
+              .then(() => setEngine(v))
+              .catch(reportError);
           }}
         />
       </Row>
@@ -1995,11 +2054,9 @@ function AiSettingsGroup({ onToast }: { onToast: (m: string) => void }) {
           options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
           aria-label={t("settings.advanced.translateLang")}
           onChange={(v) => {
-            setTranslateLang(v);
-            save("translate_target_lang", v, t("settings.advanced.translateLangLabel"));
-            // The reader caches this default to decide whether a stored
-            // translation is still current — refresh it so a change applies now.
-            qc.invalidateQueries({ queryKey: ["setting", "translate_target_lang"] });
+            void save("translate_target_lang", v, t("settings.advanced.translateLangLabel"))
+              .then(() => setTranslateLang(v))
+              .catch(reportError);
           }}
         />
       </Row>

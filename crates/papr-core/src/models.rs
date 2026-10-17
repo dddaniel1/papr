@@ -207,6 +207,8 @@ pub enum ArticleQuery {
     content = "data"
 )]
 pub enum RefreshProgress {
+    Skipped,
+    SyncFailed { error: String },
     Started { total: usize },
     FeedDone { feed_id: i64, new_articles: usize, error: Option<String> },
     Finished { new_articles: usize },

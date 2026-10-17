@@ -19,6 +19,7 @@ interface Props {
   onExplore: () => void;
   onOpenSettings: (section?: string) => void;
   onSearchClick: () => void;
+  onAi: () => void;
   /** Refresh feeds. With no scope refreshes everything (the toolbar button);
    *  pass `{ feedId }` or `{ folderId }` for the per-source context menus. */
   onRefresh: (scope?: { feedId?: number; folderId?: number }) => void;
@@ -88,6 +89,7 @@ export default function Sidebar({
   onExplore,
   onOpenSettings,
   onSearchClick,
+  onAi,
   onRefresh,
   refreshing,
   onToast,
@@ -914,6 +916,9 @@ export default function Sidebar({
           onClick={onExplore}
         >
           <Icon name="globe" size={14} />
+        </button>
+        <button title={t("ai.title")} aria-label={t("ai.title")} onClick={onAi}>
+          <Icon name="sparkle" size={14} />
         </button>
         <div className="spacer" />
         <button

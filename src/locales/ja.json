@@ -114,7 +114,10 @@
     "folderCreated": "フォルダを作成しました",
     "allFoldersExpanded": "すべてのフォルダを展開しました",
     "allFoldersCollapsed": "すべてのフォルダを折りたたみました",
-    "noFolders": "フォルダがありません"
+    "noFolders": "フォルダがありません",
+    "refreshInProgress": "更新はすでに実行中です。しばらくお待ちください。",
+    "refreshPartial": "{{count}} 件のフィードで更新に失敗しました。新着 {{added}} 件。再試行できます。",
+    "refreshSyncFailed": "フィードの更新は完了しましたが、同期に失敗しました：{{error}}"
   },
   "articleList": {
     "markedReadToast": "{{count}} 件を既読にしました",
@@ -144,7 +147,11 @@
     "markAllRead": "すべて既読にする (⇧A)",
     "markRead": "既読にする",
     "emptyState": "記事はありません — ひと息どうぞ",
-    "loadError": "記事を読み込めませんでした"
+    "loadError": "記事を読み込めませんでした",
+    "noSubscriptions": "最初のフィードを追加して読み始めましょう。",
+    "noUnread": "この条件に一致する未読記事はありません。",
+    "showAll": "すべての記事を表示",
+    "pageError": "続きの記事を読み込めませんでした。読み込み済みの記事は引き続き閲覧できます。"
   },
   "commandPalette": {
     "actionMarkAllRead": "現在のリストをすべて既読にする",
@@ -210,7 +217,7 @@
     "aiSummaryTitle": "AI要約",
     "aiReadingFullText": "全文を読み込み中…",
     "aiError": "要約を生成できませんでした",
-    "aiDisclaimer": "ローカルモデルによる生成 · 参考用 · 内容は不正確な場合があります",
+    "aiDisclaimer": "AI が生成した内容です。重要な情報は元の記事で確認してください。",
     "translateTitle": "翻訳先",
     "translateEngine": "エンジン",
     "translateEngineLlm": "AI モデル",
@@ -648,5 +655,19 @@
     "upToDate": "最新バージョンです",
     "checking": "確認中…",
     "checkButton": "アップデートを確認"
+  },
+  "ai": {
+    "title": "AI アシスタント",
+    "mode": "AI の機能",
+    "ask": "購読記事に質問",
+    "digest": "最近の記事のまとめ",
+    "askHint": "購読記事全体について質問できます。ローカルライブラリから検索した関連記事をもとに回答します。",
+    "digestHint": "ローカルライブラリの最近の記事（最大30件）からまとめを生成します。",
+    "question": "何を知りたいですか？",
+    "submit": "質問する",
+    "generate": "まとめを生成",
+    "generating": "生成中…",
+    "configure": "AI 設定",
+    "linkError": "リンクを開けませんでした。"
   }
 }

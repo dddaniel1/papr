@@ -114,7 +114,10 @@
     "folderCreated": "已创建文件夹",
     "allFoldersExpanded": "已展开所有文件夹",
     "allFoldersCollapsed": "已折叠所有文件夹",
-    "noFolders": "暂无文件夹"
+    "noFolders": "暂无文件夹",
+    "refreshInProgress": "已有刷新任务正在运行，请稍候。",
+    "refreshPartial": "{{count}} 个订阅源刷新失败，新增 {{added}} 篇文章，可重试刷新。",
+    "refreshSyncFailed": "订阅源刷新完成，但同步失败：{{error}}"
   },
   "articleList": {
     "markedReadToast": "已将 {{count}} 篇标为已读",
@@ -144,7 +147,11 @@
     "markAllRead": "全部标为已读 (⇧A)",
     "markRead": "标为已读",
     "emptyState": "这里没有文章了 — 享受一下空白",
-    "loadError": "文章加载失败"
+    "loadError": "文章加载失败",
+    "noSubscriptions": "添加第一个订阅源，开始阅读。",
+    "noUnread": "当前筛选下没有未读文章。",
+    "showAll": "查看全部文章",
+    "pageError": "后续文章加载失败，已加载的文章仍可阅读。"
   },
   "commandPalette": {
     "actionMarkAllRead": "将当前列表全部标为已读",
@@ -210,7 +217,7 @@
     "aiSummaryTitle": "AI 摘要",
     "aiReadingFullText": "正在阅读全文…",
     "aiError": "无法生成摘要",
-    "aiDisclaimer": "由本地模型生成 · 仅供参考 · 内容可能不准确",
+    "aiDisclaimer": "由 AI 生成，重要信息请核对原文。",
     "translateTitle": "翻译为",
     "translateEngine": "引擎",
     "translateEngineLlm": "AI 模型",
@@ -648,5 +655,19 @@
     "upToDate": "已是最新版本",
     "checking": "检查中…",
     "checkButton": "检查更新"
+  },
+  "ai": {
+    "title": "AI 助手",
+    "mode": "AI 功能",
+    "ask": "向订阅内容提问",
+    "digest": "近期文章简报",
+    "askHint": "跨订阅源提问，回答依据本地资料库中检索到的相关文章。",
+    "digestHint": "根据本地资料库中最近的最多 30 篇文章生成简报。",
+    "question": "你想了解什么？",
+    "submit": "提问",
+    "generate": "生成简报",
+    "generating": "正在生成…",
+    "configure": "AI 设置",
+    "linkError": "无法打开此链接。"
   }
 }

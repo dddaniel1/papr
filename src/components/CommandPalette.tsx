@@ -12,6 +12,8 @@ import FeedAvatar from "./FeedAvatar";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export type CommandAction =
+  | "ai-ask"
+  | "ai-digest"
   | "mark-all-read"
   | "toggle-theme"
   | "toggle-focus"
@@ -42,6 +44,8 @@ interface Item {
 }
 
 const ACTIONS: { icon: IconName; labelKey: string; hint: string; action: CommandAction }[] = [
+  { icon: "sparkle", labelKey: "ai.ask", hint: "", action: "ai-ask" },
+  { icon: "text", labelKey: "ai.digest", hint: "", action: "ai-digest" },
   { icon: "check-all", labelKey: "commandPalette.actionMarkAllRead", hint: "⇧A", action: "mark-all-read" },
   { icon: "globe", labelKey: "commandPalette.actionToggleTheme", hint: "⇧D", action: "toggle-theme" },
   { icon: "focus", labelKey: "commandPalette.actionToggleFocus", hint: "F", action: "toggle-focus" },

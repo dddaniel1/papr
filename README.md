@@ -28,7 +28,7 @@ the CLI can never drift apart.
 - **Smart views** — All, Unread, Starred, and Read Later, with live counts.
 - **Tags & rules** — color-coded tags and rules that tag new articles automatically.
 - **Full-text** — fetch and clean the complete article when a feed ships only a summary.
-- **AI** — summaries, ask-the-article Q&A, and digests. Bring your own API key.
+- **AI** — summaries, questions across your feeds, and recent-article briefings. Bring your own API key.
 - **Audio** — a built-in player that follows you from article to article.
 - **FreshRSS sync** — keep read state, subscriptions and folders in step with a FreshRSS or Miniflux server.
 - **Local-first** — everything stays on your machine. No account, no cloud.

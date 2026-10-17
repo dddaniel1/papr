@@ -26,6 +26,7 @@ import PromptDialog from "./components/PromptDialog";
 import PlayerBar from "./components/PlayerBar";
 import ResizeHandle from "./components/ResizeHandle";
 import Icon from "./components/Icon";
+import AiDialog, { type AiMode } from "./components/AiDialog";
 import { PANEL_BOUNDS } from "./store";
 
 // The accent per (palette, mode), fed to --accent / --accent-soft / --accent-ink.
@@ -111,6 +112,7 @@ export default function App() {
   const [addFeedUrl, setAddFeedUrl] = useState<string | undefined>(undefined);
   // The standalone Explore (curated-directory marketplace) dialog.
   const [explore, setExplore] = useState(false);
+  const [aiMode, setAiMode] = useState<AiMode | null>(null);
   const [newFolder, setNewFolder] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
 
@@ -120,8 +122,8 @@ export default function App() {
   // reader watches this flag and tears the view down while a modal is up.
   const setModalOpen = useUi((s) => s.setModalOpen);
   useEffect(() => {
-    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder || sidebarExpanded);
-  }, [cpOpen, settings.open, addFeed, explore, newFolder, sidebarExpanded, setModalOpen]);
+    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder || sidebarExpanded || aiMode != null);
+  }, [cpOpen, settings.open, addFeed, explore, newFolder, sidebarExpanded, aiMode, setModalOpen]);
 
   // ── apply appearance to the document root ──
   useEffect(() => {
@@ -303,7 +305,7 @@ export default function App() {
   // twice under StrictMode, which previously fired the refresh twice in dev.
   // `refreshing` state is kept purely to drive the sidebar spinner.
   const refreshingRef = useRef(false);
-  const doRefresh = useCallback((scope?: { feedId?: number; folderId?: number }) => {
+  const doRefresh = useCallback((scope?: { feedId?: number; folderId?: number }): void => {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setRefreshing(true);
@@ -314,14 +316,34 @@ export default function App() {
           ? t("app.refreshingFolder")
           : t("app.refreshing"),
     );
+    let skipped = false;
+    const failed = new Set<number>();
+    let syncError = "";
     api
-      .refreshFeeds(undefined, scope)
+      .refreshFeeds((event) => {
+        if (event.event === "skipped") skipped = true;
+        if (event.event === "feedDone" && event.data.error) failed.add(event.data.feedId);
+        if (event.event === "syncFailed") syncError = event.data.error;
+      }, scope)
       .then((n) => {
         // Refresh only the caches a feed fetch can actually change — a bare
         // `invalidateQueries()` would also refetch unrelated queries (rules,
         // FreshRSS status, the open feed-discovery search).
         actions.refreshAfterFetch();
-        showToast(n > 0 ? t("app.foundNew", { count: n }) : t("app.upToDate"));
+        if (skipped) {
+          showToast(t("app.refreshInProgress"));
+        } else if (failed.size || syncError) {
+          useToasts.getState().push({
+            text: syncError
+              ? t("app.refreshSyncFailed", { error: syncError })
+              : t("app.refreshPartial", { count: failed.size, added: n }),
+            tone: "error",
+            duration: 10000,
+            action: { label: t("common.retry"), run: () => doRefresh(scope) },
+          });
+        } else {
+          showToast(n > 0 ? t("app.foundNew", { count: n }) : t("app.upToDate"));
+        }
       })
       .catch(reportError)
       .finally(() => {
@@ -358,6 +380,8 @@ export default function App() {
   // ── command-palette actions ──
   const handleCommand = (action: CommandAction) => {
     switch (action) {
+      case "ai-ask": setAiMode("ask"); break;
+      case "ai-digest": setAiMode("digest"); break;
       case "mark-all-read": markAllRead(); break;
       case "toggle-theme":
         // Flip to the opposite of what's *shown* — so from "system" it lands on
@@ -548,12 +572,13 @@ export default function App() {
             onExplore={() => setExplore(true)}
             onOpenSettings={openSettings}
             onSearchClick={() => setCpOpen(true)}
+            onAi={() => setAiMode("ask")}
             onRefresh={doRefresh}
             refreshing={refreshing}
             onExpandedChange={setSidebarExpanded}
             onToast={showToast}
           />
-          <ArticleList onToast={showToast} />
+          <ArticleList onToast={showToast} onAddFeed={() => setAddFeed(true)} />
           <Reader onToast={showToast} />
           {/* Pane resize handles. Hidden in focus mode (the sidebar + list are
               hidden then, collapsing the grid to a single reader column) and,
@@ -605,6 +630,8 @@ export default function App() {
         onNavigateFeed={navigateFeed}
         onNavigateArticle={navigateArticle}
       />
+
+      {aiMode && <AiDialog initialMode={aiMode} onClose={() => setAiMode(null)} onConfigure={() => { setAiMode(null); openSettings("advanced"); }} />}
 
       {settings.open && (
         <SettingsDialog

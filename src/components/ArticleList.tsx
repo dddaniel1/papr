@@ -20,6 +20,7 @@ const PAGE = 60;
 
 interface Props {
   onToast: (msg: string) => void;
+  onAddFeed: () => void;
 }
 
 interface Hover {
@@ -28,7 +29,7 @@ interface Hover {
   left: number;
 }
 
-export default function ArticleList({ onToast }: Props) {
+export default function ArticleList({ onToast, onAddFeed }: Props) {
   const { t, i18n } = useTranslation();
   const qc = useQueryClient();
   const actions = useArticleActions(toast.error);
@@ -131,12 +132,13 @@ export default function ArticleList({ onToast }: Props) {
       last &&
       last.index >= items.length - 6 &&
       browse.hasNextPage &&
-      !browse.isFetchingNextPage
+      !browse.isFetchingNextPage &&
+      !browse.isFetchNextPageError
     ) {
       browse.fetchNextPage();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [virt.range?.endIndex, items.length, browse.hasNextPage, browse.isFetchingNextPage]);
+  }, [virt.range?.endIndex, items.length, browse.hasNextPage, browse.isFetchingNextPage, browse.isFetchNextPageError]);
 
   // Load the previous (newer) page as the top approaches — only ever non-empty
   // when the list is anchored mid-feed (an article opened from search), so a
@@ -147,12 +149,13 @@ export default function ArticleList({ onToast }: Props) {
       first &&
       first.index <= 5 &&
       browse.hasPreviousPage &&
-      !browse.isFetchingPreviousPage
+      !browse.isFetchingPreviousPage &&
+      !browse.isFetchPreviousPageError
     ) {
       browse.fetchPreviousPage();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [virt.range?.startIndex, browse.hasPreviousPage, browse.isFetchingPreviousPage]);
+  }, [virt.range?.startIndex, browse.hasPreviousPage, browse.isFetchingPreviousPage, browse.isFetchPreviousPageError]);
 
   // Prepending a newer page shifts every loaded row down by a page, so the
   // viewport would jump. Before paint, nudge the scroll position down by the
@@ -561,15 +564,34 @@ export default function ArticleList({ onToast }: Props) {
           </div>
         )}
 
-        {!browse.isLoading && !browse.isError && items.length === 0 && (
+        {!browse.isLoading && !browse.isError && !feeds.isPending && !feeds.isError && items.length === 0 && (
           <div className="empty" style={{ height: 240 }}>
             <div className="glyph">
               <Icon name="check" size={22} />
             </div>
-            <div>{t("articleList.emptyState")}</div>
+            <div>{t(feeds.data?.length === 0
+              ? "articleList.noSubscriptions"
+              : unreadOnly ? "articleList.noUnread" : "articleList.emptyState")}</div>
+            {feeds.data?.length === 0 ? (
+              <button className="empty-retry" onClick={onAddFeed}>
+                <Icon name="plus" size={12} />{t("commandPalette.actionAddFeed")}
+              </button>
+            ) : unreadOnly ? (
+              <button className="empty-retry" onClick={toggleUnreadOnly}>{t("articleList.showAll")}</button>
+            ) : query.kind === "unread" ? (
+              <button className="empty-retry" onClick={() => useUi.getState().select({ kind: "all" }, t("smart.all"))}>{t("articleList.showAll")}</button>
+            ) : (
+              <button className="empty-retry" onClick={onAddFeed}>{t("commandPalette.actionAddFeed")}</button>
+            )}
           </div>
         )}
 
+        {browse.isFetchPreviousPageError && items.length > 0 && (
+          <div className="list-page-status" role="status">
+            {t("articleList.pageError")}
+            <button className="empty-retry" disabled={browse.isFetching} onClick={() => browse.fetchPreviousPage()}>{t("common.retry")}</button>
+          </div>
+        )}
         {!browse.isLoading && items.length > 0 && (
           <div
             role="listbox"
@@ -694,6 +716,13 @@ export default function ArticleList({ onToast }: Props) {
             })}
           </div>
         )}
+        {browse.isFetchNextPageError && items.length > 0 && (
+          <div className="list-page-status" role="status">
+            {t("articleList.pageError")}
+            <button className="empty-retry" disabled={browse.isFetching} onClick={() => browse.fetchNextPage()}>{t("common.retry")}</button>
+          </div>
+        )}
+        {browse.isFetchingNextPage && <div className="list-page-status" role="status">{t("common.loading")}</div>}
         <div style={{ height: 60 }} />
       </div>
 

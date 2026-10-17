@@ -42,8 +42,7 @@ pub async fn refresh_all(
             Err(_) => {
                 log::debug!("refresh already in progress; skipping this run");
                 if let Some(p) = &progress {
-                    let _ = p.send(RefreshProgress::Started { total: 0 });
-                    let _ = p.send(RefreshProgress::Finished { new_articles: 0 });
+                    let _ = p.send(RefreshProgress::Skipped);
                 }
                 return Ok(0);
             }
@@ -77,7 +76,12 @@ pub async fn refresh_all(
             let _ = app.emit("feeds-updated", 0);
         }
         Ok(false) => {}
-        Err(e) => log::warn!("sync failed: {e}"),
+        Err(e) => {
+            log::warn!("sync failed: {e}");
+            if let Some(p) = &progress {
+                let _ = p.send(RefreshProgress::SyncFailed { error: e.to_string() });
+            }
+        }
     }
 
     notify::update_badge(app).await;

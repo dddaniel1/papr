@@ -182,7 +182,7 @@ pub async fn refresh_core(
         });
     }
 
-    on_event(RefreshProgress::Started { total: feeds.len() });
+    on_event(RefreshProgress::Started { total: feeds.len() + newsletters.len() });
 
     let sem = Arc::new(Semaphore::new(concurrency));
     // The feed URL travels back out alongside the outcome — `refine_source_type`
@@ -257,7 +257,7 @@ pub async fn refresh_core(
 
     // Newsletter sources: poll each configured IMAP mailbox and ingest any new
     // messages as articles, alongside the RSS refresh above.
-    total_new += poll_newsletters(db, newsletters, dedup, &rules).await;
+    total_new += poll_newsletters(db, newsletters, dedup, &rules, &mut on_event).await;
 
     // Retention: drop old read articles when a finite window is configured. The
     // DELETE scans the whole table, so throttle it to once per day rather than
@@ -302,6 +302,7 @@ async fn poll_newsletters(
     sources: Vec<(i64, newsletter::NewsletterConfig)>,
     dedup: bool,
     rules: &[crate::models::Rule],
+    on_event: &mut impl FnMut(RefreshProgress),
 ) -> usize {
     if sources.is_empty() {
         return 0;
@@ -351,6 +352,8 @@ async fn poll_newsletters(
         let Ok((feed_id, fetched)) = joined else {
             continue;
         };
+        let mut new_here = 0;
+        let mut error = None;
         match fetched {
             Ok(messages) => {
                 // Parse the RFC822 bytes into articles *before* taking the DB
@@ -361,8 +364,7 @@ async fn poll_newsletters(
                     .filter_map(|raw| newsletter::email_to_article(raw))
                     .map(|p| p.article)
                     .collect();
-                total_new +=
-                    upsert_articles(db, feed_id, &articles, dedup, rules, "newsletter").await;
+                new_here = upsert_articles(db, feed_id, &articles, dedup, rules, "newsletter").await;
                 let conn = db.lock().await;
                 let _ = db::touch_feed(&conn, feed_id);
             }
@@ -370,8 +372,50 @@ async fn poll_newsletters(
                 log::warn!("newsletter poll failed (feed {feed_id}): {e}");
                 let conn = db.lock().await;
                 let _ = db::set_feed_error(&conn, feed_id, &e);
+                error = Some(e);
             }
         }
+        total_new += new_here;
+        on_event(RefreshProgress::FeedDone { feed_id, new_articles: new_here, error });
     }
     total_new
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_feed_reports_error_even_when_no_articles_arrive() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let id = db::insert_feed(
+            &conn, "not a URL", None, "Broken feed", None, SourceType::Rss, None,
+        ).unwrap();
+        let db = Mutex::new(conn);
+        let mut events = Vec::new();
+        let summary = refresh_core(&db, &reqwest::Client::new(), RefreshScope::All, |event| {
+            events.push(event)
+        }).await.unwrap();
+        assert_eq!(summary.new_articles, 0);
+        assert!(summary.ran);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RefreshProgress::FeedDone { feed_id, error: Some(_), .. } if *feed_id == id
+        )));
+        assert!(db::list_feeds(&*db.lock().await).unwrap()[0].fetch_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn no_due_feeds_is_a_noop_without_failure_events() {
+        let db = Mutex::new(db::open(std::path::Path::new(":memory:")).unwrap());
+        let mut events = Vec::new();
+        let summary = refresh_core(&db, &reqwest::Client::new(), RefreshScope::Due, |event| {
+            events.push(event)
+        }).await.unwrap();
+        assert!(!summary.ran);
+        assert!(matches!(events.as_slice(), [
+            RefreshProgress::Started { total: 0 },
+            RefreshProgress::Finished { new_articles: 0 }
+        ]));
+    }
 }

@@ -193,6 +193,8 @@ export type TranslateEvent =
   | { type: "done"; data: { html: string } };
 
 export type RefreshProgress =
+  | { event: "skipped" }
+  | { event: "syncFailed"; data: { error: string } }
   | { event: "started"; data: { total: number } }
   | {
       event: "feedDone";

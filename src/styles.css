@@ -19,8 +19,8 @@
 
   --ink: #1A1816;
   --ink-2: #3A3733;
-  --muted: #7A756C;
-  --muted-2: #A8A39A;
+  --muted: #706B62;
+  --muted-2: #6B665E;
   --hair: rgba(20, 18, 16, 0.08);
   --hair-strong: rgba(20, 18, 16, 0.14);
   --hover: rgba(20, 18, 16, 0.04);
@@ -110,8 +110,8 @@
 
   --ink: oklch(0.930 0.006 50);     /* #ebe7e4 — soft warm white, never #fff */
   --ink-2: oklch(0.800 0.006 48);
-  --muted: oklch(0.605 0.006 45);
-  --muted-2: oklch(0.455 0.006 44);
+  --muted: oklch(0.665 0.006 45);
+  --muted-2: oklch(0.665 0.006 44);
   /* Hairlines do real work here — they're what makes the stepped panes read as
      crisp divisions rather than a soft blur, so they're a touch stronger. */
   --hair: rgba(246, 240, 238, 0.09);
@@ -179,7 +179,7 @@
   --ink: #1D1D1F;                   /* near-black cool */
   --ink-2: #3A3A3C;
   --muted: #6E6E73;
-  --muted-2: #8E8E93;
+  --muted-2: #68686E;
   --hair: rgba(60, 60, 67, 0.11);   /* cool-grey separators, macOS style */
   --hair-strong: rgba(60, 60, 67, 0.18);
   --hover: rgba(60, 60, 67, 0.05);
@@ -204,8 +204,8 @@
 
   --ink: #E6E8EC;                   /* cool near-white */
   --ink-2: #B9BDC5;
-  --muted: #868B95;
-  --muted-2: #5C616B;
+  --muted: #979CA6;
+  --muted-2: #979CA6;
   --hair: rgba(220, 226, 235, 0.09);
   --hair-strong: rgba(220, 226, 235, 0.15);
   --hover: rgba(220, 226, 235, 0.05);
@@ -234,7 +234,7 @@
   --ink: #000000;
   --ink-2: #1A1A1A;
   --muted: #595959;                 /* still AA on white */
-  --muted-2: #757575;
+  --muted-2: #666666;
   --hair: rgba(0, 0, 0, 0.22);      /* strong, defined dividers */
   --hair-strong: rgba(0, 0, 0, 0.40);
   --hover: rgba(0, 0, 0, 0.06);
@@ -258,7 +258,7 @@
   --ink: #FFFFFF;
   --ink-2: #E0E0E0;
   --muted: #B0B0B0;
-  --muted-2: #8A8A8A;
+  --muted-2: #A0A0A0;
   --hair: rgba(255, 255, 255, 0.24);
   --hair-strong: rgba(255, 255, 255, 0.42);
   --hover: rgba(255, 255, 255, 0.08);
@@ -802,9 +802,10 @@ button { font-family: inherit; }
 .art:hover { background: var(--hover); }
 .art.active { background: var(--accent-soft); }
 .art.read .art-title { color: var(--muted); font-weight: 500; }
-.art.read .art-feed { opacity: 0.7; }
+.art.read .art-feed { color: var(--muted); }
 .art.read .art-snippet { color: var(--muted-2); }
 .art.read .art-dot { opacity: 0; }
+.art.active.read .art-title, .art.active.read .art-snippet, .art.active.read .art-feed, .art.active .art-time { color: var(--accent-ink); }
 
 .art-head {
   display: flex;
@@ -1651,6 +1652,11 @@ button { font-family: inherit; }
   font-family: var(--mono);
 }
 .settings-nav-item {
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: start;
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -3134,7 +3140,7 @@ button { font-family: inherit; }
    to lose, not the buttons: they collapse to icons that keep their tooltip,
    their pressed state and their accessible name (visually hidden, not
    `display: none`, so they stay in the tree). */
-@container list (max-width: 400px) {
+@container list (max-width: 340px) {
   .list-meta-btn .lbl,
   .list-translate-btn .lbl {
     position: absolute;
@@ -3306,3 +3312,18 @@ button { font-family: inherit; }
 @container reader (max-width: 430px) {
   .article-title { font-size: 30px; line-height: 1.16; }
 }
+
+.settings-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.list-meta { flex-wrap: wrap; }
+.list-title { flex-wrap: wrap; }
+.list-title-meta { margin-left: auto; }
+.list-page-status { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; color: var(--ink-2); font-size: 13px; text-align: center; }
+.empty .empty-retry { margin-top: 12px; }
+
+.ai-dialog { width: min(720px, calc(100vw - 32px)); }
+.ai-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.ai-dialog-head h2 { margin: 0; }
+.ai-dialog-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-block: 12px; }
+.ai-dialog-result { margin-top: 20px; overflow-wrap: anywhere; }
+.ai-dialog-error { color: var(--danger); overflow-wrap: anywhere; }
+@media (max-width: 600px) { .settings-nav-item { width: auto; } }
