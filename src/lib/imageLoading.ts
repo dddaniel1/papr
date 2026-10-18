@@ -27,7 +27,12 @@ export function imageUrl(src: string, pageUrl?: string | null): string | null {
 
 export function needsImageProxy(src: string): boolean {
   try {
-    return ["cdnfile.sspai.com", "rssfile.sspai.com"].includes(new URL(src).hostname);
+    const url = new URL(src);
+    if (["cdnfile.sspai.com", "rssfile.sspai.com"].includes(url.hostname)) return true;
+    const path = url.pathname.toLowerCase();
+    if (path.endsWith(".heic") || path.endsWith(".heif")) return true;
+    if (url.search.toLowerCase().includes(".heic") || url.search.toLowerCase().includes(".heif")) return true;
+    return false;
   } catch {
     return false;
   }

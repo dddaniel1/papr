@@ -21,6 +21,8 @@ export function imageMime(src: string, bytes: Uint8Array): string {
   if (path.endsWith(".gif")) return "image/gif";
   if (path.endsWith(".svg")) return "image/svg+xml";
   if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+  if (path.endsWith(".heic")) return "image/heic";
+  if (path.endsWith(".heif")) return "image/heif";
   return "image/jpeg";
 }
 
@@ -45,10 +47,25 @@ function sniffImageMime(b: Uint8Array): string | null {
   if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return "image/bmp";
   if (b.length >= 4 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0) return "image/x-icon";
   if (b.length >= 16 && String.fromCharCode(...b.subarray(4, 8)) === "ftyp") {
+    let hasHeif = false;
     for (let i = 8; i + 4 <= Math.min(b.length, 64); i += 4) {
       const brand = String.fromCharCode(...b.subarray(i, i + 4));
       if (brand === "avif" || brand === "avis") return "image/avif";
+      if (
+        brand === "heic" ||
+        brand === "heix" ||
+        brand === "hevc" ||
+        brand === "hevx" ||
+        brand === "heim" ||
+        brand === "heis"
+      ) {
+        return "image/heic";
+      }
+      if (brand === "heif") {
+        hasHeif = true;
+      }
     }
+    if (hasHeif) return "image/heif";
   }
   const text = new TextDecoder().decode(b.subarray(0, 4096))
     .replace(/^\uFEFF/, "").trimStart()

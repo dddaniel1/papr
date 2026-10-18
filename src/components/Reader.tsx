@@ -12,6 +12,7 @@ import { renderMarkdown } from "../lib/markdown";
 import { normalizeImageHtml, watchImage } from "../lib/imageLoading";
 import ArticleImage from "./ArticleImage";
 import { fullDate } from "../lib/feedMeta";
+import { bilibiliPlayerUrl } from "../lib/bilibili";
 import { isMac } from "../lib/platform";
 import { reportError, toast } from "../toast";
 import { tagColor } from "../lib/tagColors";
@@ -699,6 +700,10 @@ export default function Reader({ onToast }: Props) {
   };
 
   const ytId = a.sourceType === "youtube" ? youtubeId(a.url) : null;
+  // Keep YouTube's privacy-enhanced host; Bilibili RSSHub items remain ordinary RSS.
+  const playerUrl = ytId
+    ? `https://www.youtube-nocookie.com/embed/${ytId}`
+    : bilibiliPlayerUrl(a.url);
 
   return (
     <div className="reader" role="main">
@@ -779,10 +784,10 @@ export default function Reader({ onToast }: Props) {
           <Icon name="globe" size={16} />
         </button>
         <HighlightLayer
-          // Keyed by article id so the export menu / popovers reset cleanly
+          // Keyed by article id so the export action / popovers reset cleanly
           // when the reader switches articles.
           key={a.id}
-          articleId={a.id}
+          article={a}
           bodyRef={bodyRef}
           bodyVersion={displayBody}
         />
@@ -899,12 +904,11 @@ export default function Reader({ onToast }: Props) {
             </div>
           )}
 
-          {ytId ? (
+          {playerUrl ? (
             <iframe
+              key={playerUrl}
               style={{ width: "100%", aspectRatio: "16 / 9" }}
-              // Privacy-enhanced host: YouTube sets no tracking cookies
-              // until the viewer actually starts the video.
-              src={`https://www.youtube-nocookie.com/embed/${ytId}`}
+              src={playerUrl}
               title={a.title}
               referrerPolicy="strict-origin-when-cross-origin"
               allowFullScreen

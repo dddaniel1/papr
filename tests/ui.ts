@@ -1,6 +1,6 @@
 // Open /tests/ui.html with `pnpm dev`. All IPC uses disposable in-memory data.
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import type { ArticleSummary, Feed } from "../src/types";
+import type { ArticleSummary, Feed, Highlight } from "../src/types";
 
 const feed: Feed = {
   id: 1, title: "Test feed", feedUrl: "https://example.test/feed", siteUrl: null,
@@ -14,8 +14,11 @@ const articles: ArticleSummary[] = Array.from({ length: 120 }, (_, i) => ({
   imageUrl: null, url: null, publishedAt: "2026-10-17T00:00:00Z", isRead: false,
   isStarred: false, readLater: false,
 }));
+articles[2] = { ...articles[2], title: "RSSHub Bilibili video", url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2", imageUrl: "https://example.test/bilibili-cover.jpg" };
 const state = {
   feeds: [] as Feed[], articles: [] as ArticleSummary[], settings: new Map<string, string>(),
+  highlights: [] as Highlight[], savedFile: null as null | { content: string; defaultName: string; extensions: string[] },
+  saveResult: true, saveError: "", saveCalls: 0,
   failSetting: "", failPage: false, refresh: "partial", summaryCalls: 0,
   pendingSummary: null as null | (() => void), askCalls: 0, digestCalls: 0,
 };
@@ -27,7 +30,13 @@ mockIPC(async (cmd, args: any = {}) => {
       if (args.key === state.failSetting) throw new Error("Test save failure");
       state.settings.set(args.key, args.value); return;
     case "list_feeds": return state.feeds;
-    case "list_folders": case "list_tags": case "list_rules": case "list_highlights": return [];
+    case "list_folders": case "list_tags": case "list_rules": return [];
+    case "list_highlights": return state.highlights.filter((h) => h.articleId === args.articleId);
+    case "save_text_file":
+      state.saveCalls++;
+      if (state.saveError) throw new Error(state.saveError);
+      state.savedFile = args;
+      return state.saveResult;
     case "smart_counts": return { unread: state.articles.length, starred: 0, readLater: 0 };
     case "list_articles":
       if (state.failPage && args.offset > 0) throw new Error("Test page failure");
@@ -153,7 +162,51 @@ async function runChecks() {
   checks.push("Pagination error is visible and retry recovers");
 
   useUi.getState().openArticle(1);
-  await waitFor(() => !!document.querySelector(".reader-toolbar"), "reader");
+  await waitFor(() => !!document.querySelector('button[aria-label="Export highlights and notes as Markdown"]'), "reader loaded");
+  const exportSelector = 'button[aria-label="Export highlights and notes as Markdown"]';
+  if (!document.querySelector<HTMLButtonElement>(exportSelector)?.disabled) throw new Error("Empty highlights can be exported");
+  state.highlights = [{ id: 1, articleId: 2, quote: "Full article body.", note: "我的笔记", textOffset: 0, prefix: "", suffix: "", color: "yellow", createdAt: "" }];
+  useUi.getState().openArticle(2);
+  await waitFor(() => document.querySelector<HTMLButtonElement>(exportSelector)?.disabled === false, "export available");
+  click(exportSelector);
+  await waitFor(() => document.querySelector(".toast")?.textContent?.includes("Highlights and notes exported") ?? false, "export feedback");
+  if (state.savedFile?.content !== "# Article 2\n\nTest feed\n\n> Full article body\\.\n\n我的笔记\n" || state.savedFile.defaultName !== "papr-highlights-2.md") throw new Error("Export content differs");
+  state.saveResult = false;
+  const { useToasts } = await import("../src/toast");
+  useToasts.getState().dismiss();
+  click(exportSelector);
+  await waitFor(() => state.saveCalls === 2 && document.querySelector<HTMLButtonElement>(exportSelector)?.disabled === false, "cancelled export");
+  if (document.querySelector(".toast")?.textContent?.includes("Highlights and notes exported")) throw new Error("Cancelled export reports success");
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  state.saveResult = true; state.saveError = "Test export failure";
+  click(exportSelector);
+  await waitFor(() => document.body.textContent!.includes("Test export failure"), "export failure");
+  await waitFor(() => document.querySelector<HTMLButtonElement>(exportSelector)?.disabled === false, "export retry available");
+  state.saveError = "";
+  useUi.getState().openArticle(1);
+  await waitFor(() => document.querySelector<HTMLButtonElement>(exportSelector)?.disabled === true, "article without highlights");
+  checks.push("Highlight export preserves notes, handles cancel/failure and resets between articles");
+
+  useUi.getState().openArticle(3);
+  await waitFor(() => !!document.querySelector('iframe[src*="player.bilibili.com"]'), "Bilibili player");
+  const player = document.querySelector<HTMLIFrameElement>('iframe[src*="player.bilibili.com"]')!;
+  const playerUrl = new URL(player.src);
+  if (playerUrl.searchParams.get("bvid") !== "BV1xx411c7mD" || playerUrl.searchParams.get("p") !== "2" || playerUrl.searchParams.get("autoplay") !== "0") throw new Error("Bilibili player parameters differ");
+  if (document.querySelector(".reader-hero")) throw new Error("Video also renders a hero cover");
+  const readerScroll = document.querySelector(".reader-scroll")!;
+  const articleBody = document.querySelector<HTMLElement>(".reader-scroll article")!;
+  const previousMinHeight = articleBody.style.minHeight;
+  articleBody.style.minHeight = "2000px";
+  readerScroll.scrollTop = 100;
+  readerScroll.dispatchEvent(new Event("scroll"));
+  await waitFor(() => !!document.querySelector(".reader-toolbar.scrolled"), "reader scrolled");
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (document.querySelector('iframe[src*="player.bilibili.com"]') !== player) throw new Error("Scroll replaced the Bilibili player");
+  articleBody.style.minHeight = previousMinHeight;
+  useUi.getState().openArticle(1);
+  await waitFor(() => !document.querySelector('iframe[src*="player.bilibili.com"]'), "player cleanup");
+  checks.push("RSSHub Bilibili uses the official player, disables autoplay and survives scroll");
+
   useUi.getState().setAiOpen(true);
   await waitFor(() => state.summaryCalls === 1, "summary request");
   useUi.getState().setAiOpen(false);

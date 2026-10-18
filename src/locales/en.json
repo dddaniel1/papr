@@ -360,6 +360,32 @@
       "opmlExported": "OPML exported",
       "opmlImported": "Imported {{count}} feeds from OPML",
       "unsubscribed": "Unsubscribed from {{title}}",
+      "selectedCount": "Selected {{count}} feeds",
+      "selectAll": "Select all",
+      "invertSelection": "Invert",
+      "clearSelection": "Deselect",
+      "batchMoveFolder": "Move to folder",
+      "batchInterval": "Refresh interval",
+      "batchOpenMode": "Open mode",
+      "batchAutoTranslate": "Auto-translate",
+      "batchTranslateOn": "Enable auto-translate",
+      "batchTranslateOff": "Disable auto-translate",
+      "batchRefresh": "Refresh",
+      "batchUnsubscribe": "Unsubscribe",
+      "batchUnsubscribeConfirmTitle": "Unsubscribe from {{count}} feeds?",
+      "batchUnsubscribeConfirmDesc": "This will permanently delete the {{count}} selected feeds and all their stored articles. This action cannot be undone.",
+      "batchUnsubscribed": "Unsubscribed from {{count}} feeds",
+      "batchMoved": "Moved {{count}} feeds to \"{{folder}}\"",
+      "batchMovedRoot": "Removed {{count}} feeds from folder",
+      "batchUpdated": "Updated {{count}} feeds",
+      "batchRefreshing": "Refreshing {{count}} selected feeds…",
+      "batchRefreshed": "Selected feeds refreshed",
+      "folderFilterAll": "All folders",
+      "folderFilterNone": "Uncategorized",
+      "noFolder": "None",
+      "columnFeed": "Feed",
+      "columnFolder": "Folder",
+      "columnInterval": "Interval",
       "rsshubTitle": "RSSHub",
       "rsshubInstance": "Instance",
       "rsshubInstanceDesc": "Paste rsshub:// links to subscribe. Leave blank for the public rsshub.app, or point to your self-hosted instance."
@@ -597,7 +623,8 @@
     "tagsEmptyHint": "Tag articles while reading to group them here.",
     "toastTagCreated": "Tag created",
     "toastTagDeleted": "Tag deleted",
-    "toggleSidebar": "Toggle sidebar"
+    "toggleSidebar": "Toggle sidebar",
+    "editFeedMenu": "Edit Feed…"
   },
   "error": {
     "db": "Database error: {{detail}}",
@@ -675,5 +702,18 @@
     "generating": "Generating…",
     "configure": "AI settings",
     "linkError": "Could not open this link."
+  },
+  "editFeed": {
+    "dialogTitle": "Edit Feed",
+    "titleLabel": "Name",
+    "folderLabel": "Folder",
+    "urlLabel": "Feed URL",
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyUrl": "Copy Feed URL",
+    "toastSaved": "Feed updated",
+    "errorEmptyTitle": "Title cannot be empty",
+    "errorEmptyUrl": "URL cannot be empty",
+    "errorUrlExists": "A feed with this URL already exists"
   }
 }

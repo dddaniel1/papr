@@ -919,6 +919,57 @@ pub fn rename_feed(conn: &Connection, id: i64, title: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Update a feed's core properties atomically: display title, feed URL, folder, and open mode.
+/// If `feed_url` changes, validates uniqueness, updates the URL, and clears caching headers
+/// (etag, last_modified) and fetch_error so the next poll fetches fresh content cleanly.
+pub fn update_feed(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    feed_url: &str,
+    folder_id: Option<i64>,
+    open_mode: Option<&str>,
+) -> AppResult<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(AppError::code("emptyFeedTitle"));
+    }
+    let feed_url = feed_url.trim();
+    if feed_url.is_empty() {
+        return Err(AppError::code("emptyFeedUrl"));
+    }
+    let current_url: Option<String> = conn
+        .query_row("SELECT feed_url FROM feeds WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?;
+    let url_changed = match current_url {
+        Some(ref u) => u != feed_url,
+        None => return Err(AppError::code("feedNotFound")),
+    };
+
+    if url_changed {
+        let duplicate: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM feeds WHERE feed_url = ?1 AND id != ?2",
+                params![feed_url, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if duplicate.is_some() {
+            return Err(AppError::code("feedAlreadyExists"));
+        }
+        conn.execute(
+            "UPDATE feeds SET title = ?2, custom_title = 1, feed_url = ?3, folder_id = ?4, open_mode = ?5, etag = NULL, last_modified = NULL, fetch_error = NULL WHERE id = ?1",
+            params![id, title, feed_url, folder_id, open_mode],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE feeds SET title = ?2, custom_title = 1, folder_id = ?3, open_mode = ?4 WHERE id = ?1",
+            params![id, title, folder_id, open_mode],
+        )?;
+    }
+    Ok(())
+}
+
 // ─────────────────────────── newsletter sources ───────────────────────────
 
 /// One configured email-newsletter source: the backing feed plus its IMAP
@@ -4519,6 +4570,71 @@ mod tests {
             .unwrap();
         assert_eq!(title, original, "a rejected rename must not alter the title");
         assert!(!custom, "a rejected rename must not set the custom_title flag");
+    }
+
+    #[test]
+    fn update_feed_updates_fields_and_clears_cache_on_url_change() {
+        let (conn, _aid) = test_db();
+        let feed_id: i64 = conn
+            .query_row("SELECT id FROM feeds", [], |r| r.get(0))
+            .unwrap();
+
+        conn.execute(
+            "UPDATE feeds SET etag = 'etag123', last_modified = 'yesterday', fetch_error = 'some error' WHERE id = ?1",
+            [feed_id],
+        ).unwrap();
+
+        let folder_id = create_folder(&conn, "Tech Folder").unwrap();
+        update_feed(
+            &conn,
+            feed_id,
+            "Updated Title",
+            "https://new-example.com/rss.xml",
+            Some(folder_id),
+            Some("extracted"),
+        ).unwrap();
+
+        let (title, url, fid, mode, etag, error): (
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT title, feed_url, folder_id, open_mode, etag, fetch_error FROM feeds WHERE id = ?1",
+                [feed_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+
+        assert_eq!(title, "Updated Title");
+        assert_eq!(url, "https://new-example.com/rss.xml");
+        assert_eq!(fid, Some(folder_id));
+        assert_eq!(mode.as_deref(), Some("extracted"));
+        assert!(etag.is_none(), "etag should be cleared on url change");
+        assert!(error.is_none(), "fetch_error should be cleared on url change");
+
+        let other_feed_id = insert_feed(
+            &conn,
+            "https://another.com/rss",
+            None,
+            "Another Feed",
+            None,
+            SourceType::Rss,
+            None,
+        ).unwrap();
+
+        let dup_err = update_feed(
+            &conn,
+            other_feed_id,
+            "Dup Feed",
+            "https://new-example.com/rss.xml",
+            None,
+            None,
+        ).unwrap_err();
+        assert!(dup_err.to_string().contains("feedAlreadyExists"));
     }
 
     #[test]

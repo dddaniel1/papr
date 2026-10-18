@@ -34,10 +34,13 @@ describe("imageMime", () => {
     expect(imageMime("x", webp)).toBe("image/webp");
   });
 
-  it("detects extensionless SVG, AVIF, BMP and icon responses", () => {
+  it("detects extensionless SVG, AVIF, HEIC, HEIF, BMP and icon responses", () => {
     const encode = (value: string) => new TextEncoder().encode(value);
     expect(imageMime("x", encode('<?xml version="1.0"?><!-- image --><svg xmlns="http://www.w3.org/2000/svg"/>'))).toBe("image/svg+xml");
     expect(imageMime("x", new Uint8Array([0, 0, 0, 20, ...encode("ftypavif"), 0, 0, 0, 0]))).toBe("image/avif");
+    expect(imageMime("x", new Uint8Array([0, 0, 0, 20, ...encode("ftypheic"), 0, 0, 0, 0]))).toBe("image/heic");
+    expect(imageMime("x", new Uint8Array([0, 0, 0, 24, ...encode("ftypmif1"), 0, 0, 0, 0, ...encode("heic")]))).toBe("image/heic");
+    expect(imageMime("x", new Uint8Array([0, 0, 0, 20, ...encode("ftypheif"), 0, 0, 0, 0]))).toBe("image/heif");
     expect(imageMime("x", encode("BM"))).toBe("image/bmp");
     expect(imageMime("x", new Uint8Array([0, 0, 1, 0]))).toBe("image/x-icon");
   });
@@ -52,6 +55,8 @@ describe("imageMime", () => {
     expect(imageMime("https://cdn.example/a.png?v=2", junk)).toBe("image/png");
     expect(imageMime("https://cdn.example/a.svg", junk)).toBe("image/svg+xml");
     expect(imageMime("https://cdn.example/a.webp#frag", junk)).toBe("image/webp");
+    expect(imageMime("https://cdn.example/a.heic", junk)).toBe("image/heic");
+    expect(imageMime("https://cdn.example/a.heif#frag", junk)).toBe("image/heif");
   });
 
   it("defaults to image/jpeg when nothing identifies the type", () => {

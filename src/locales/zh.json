@@ -360,6 +360,32 @@
       "opmlExported": "OPML 已导出",
       "opmlImported": "已从 OPML 导入 {{count}} 个订阅源",
       "unsubscribed": "已退订 {{title}}",
+      "selectedCount": "已选 {{count}} 个订阅源",
+      "selectAll": "全选",
+      "invertSelection": "反选",
+      "clearSelection": "取消选择",
+      "batchMoveFolder": "移动分组",
+      "batchInterval": "刷新间隔",
+      "batchOpenMode": "打开方式",
+      "batchAutoTranslate": "自动翻译",
+      "batchTranslateOn": "开启自动翻译",
+      "batchTranslateOff": "关闭自动翻译",
+      "batchRefresh": "立即刷新",
+      "batchUnsubscribe": "批量退订",
+      "batchUnsubscribeConfirmTitle": "退订选中的 {{count}} 个订阅源？",
+      "batchUnsubscribeConfirmDesc": "将永久删除选中的 {{count}} 个订阅源及其所有已存储文章，此操作不可撤销。",
+      "batchUnsubscribed": "已退订 {{count}} 个订阅源",
+      "batchMoved": "已将 {{count}} 个订阅源移至「{{folder}}」",
+      "batchMovedRoot": "已将 {{count}} 个订阅源移出分组",
+      "batchUpdated": "已批量更新 {{count}} 个订阅源",
+      "batchRefreshing": "正在刷新选中的 {{count}} 个订阅源…",
+      "batchRefreshed": "选中的订阅源已刷新",
+      "folderFilterAll": "全部分组",
+      "folderFilterNone": "未分组",
+      "noFolder": "未分组",
+      "columnFeed": "订阅源",
+      "columnFolder": "分组",
+      "columnInterval": "刷新间隔",
       "rsshubTitle": "RSSHub",
       "rsshubInstance": "实例地址",
       "rsshubInstanceDesc": "粘贴 rsshub:// 链接即可订阅。留空使用公共的 rsshub.app，或填入你自托管的实例地址。"
@@ -597,7 +623,8 @@
     "tagsEmptyHint": "在阅读时给文章打标签，即可在此分组。",
     "toastTagCreated": "已创建标签",
     "toastTagDeleted": "已删除标签",
-    "toggleSidebar": "切换侧栏"
+    "toggleSidebar": "切换侧栏",
+    "editFeedMenu": "编辑订阅源…"
   },
   "error": {
     "db": "数据库出错：{{detail}}",
@@ -675,5 +702,18 @@
     "generating": "正在生成…",
     "configure": "AI 设置",
     "linkError": "无法打开此链接。"
+  },
+  "editFeed": {
+    "dialogTitle": "编辑订阅源",
+    "titleLabel": "名称",
+    "folderLabel": "所属文件夹",
+    "urlLabel": "订阅源地址",
+    "copy": "复制",
+    "copied": "已复制",
+    "copyUrl": "复制订阅源地址",
+    "toastSaved": "已保存修改",
+    "errorEmptyTitle": "名称不能为空",
+    "errorEmptyUrl": "订阅源地址不能为空",
+    "errorUrlExists": "该地址已存在，无法重复订阅"
   }
 }

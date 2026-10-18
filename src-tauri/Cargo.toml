@@ -60,6 +60,11 @@ serde_json = "1"
 # Shared verbatim with the agent CLI so both link the same data code.
 papr-core = { path = "../crates/papr-core" }
 
+# image decoding & transcoding for webview compatibility
+zune-heic = "0.5"
+zune-core = "0.5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 # data layer
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 rusqlite_migration = "1"

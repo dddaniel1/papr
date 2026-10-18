@@ -597,7 +597,8 @@
     "tagsEmptyHint": "記事を読みながらタグを付けると、ここにまとまります。",
     "toastTagCreated": "タグを作成しました",
     "toastTagDeleted": "タグを削除しました",
-    "toggleSidebar": "サイドバーを切り替え"
+    "toggleSidebar": "サイドバーを切り替え",
+    "editFeedMenu": "フィードを編集…"
   },
   "error": {
     "db": "データベースエラー：{{detail}}",
@@ -675,5 +676,18 @@
     "generating": "生成中…",
     "configure": "AI 設定",
     "linkError": "リンクを開けませんでした。"
+  },
+  "editFeed": {
+    "dialogTitle": "フィードの編集",
+    "titleLabel": "名前",
+    "folderLabel": "フォルダー",
+    "urlLabel": "フィードURL",
+    "copy": "コピー",
+    "copied": "コピー済み",
+    "copyUrl": "フィードURLをコピー",
+    "toastSaved": "変更を保存しました",
+    "errorEmptyTitle": "タイトルを入力してください",
+    "errorEmptyUrl": "URLを入力してください",
+    "errorUrlExists": "このURLは既に登録されています"
   }
 }

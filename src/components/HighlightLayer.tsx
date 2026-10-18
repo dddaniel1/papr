@@ -1,18 +1,15 @@
 // Highlight & annotation layer for the Reader (feature F7).
 //
-// Owns three pieces of UI laid over the article body:
-//   1. a floating colour toolbar shown when text is selected,
-//   2. a popover for editing / deleting an existing highlight,
-//   3. an export menu (Markdown copy/save, Obsidian, Readwise, Notion).
+// Owns the selection toolbar, highlight editor and Markdown export action.
 //
 // The pure re-anchoring lives in `lib/anchor.ts`; the DOM wrapping in
 // `lib/highlightDom.ts`. This component is the glue that calls them and the
-// `create_highlight` / export Tauri commands.
+// highlight Tauri commands.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../api";
-import { reportError, withUndo } from "../toast";
+import { reportError, toast, withUndo } from "../toast";
 import {
   applyHighlights,
   clearHighlights,
@@ -22,12 +19,14 @@ import {
 import { captureContext } from "../lib/anchor";
 import { HIGHLIGHT_COLORS } from "../lib/highlightColors";
 import { clampAxis } from "../lib/viewport";
-import type { Highlight } from "../types";
+import { highlightsMarkdown } from "../lib/highlightExport";
+import { saveTextFile } from "../lib/save";
+import type { ArticleDetail, Highlight } from "../types";
 import Icon from "./Icon";
 
 interface Props {
   /** The article whose body is highlighted. */
-  articleId: number;
+  article: Pick<ArticleDetail, "id" | "title" | "feedTitle" | "url">;
   /** Ref to the rendered article-body div the highlights are applied into. */
   bodyRef: React.RefObject<HTMLDivElement | null>;
   /** The rendered body HTML — changes whenever the Reader swaps the body
@@ -49,11 +48,13 @@ interface PendingSelection {
 }
 
 export default function HighlightLayer({
-  articleId,
+  article,
   bodyRef,
   bodyVersion,
 }: Props) {
   const { t } = useTranslation();
+  const articleId = article.id;
+  const [exporting, setExporting] = useState(false);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [toolbar, setToolbar] = useState<ToolbarPos | null>(null);
   const pendingRef = useRef<PendingSelection | null>(null);
@@ -201,8 +202,36 @@ export default function HighlightLayer({
     });
   };
 
+  const exportHighlights = async () => {
+    if (exporting || highlights.length === 0 || editingHl) return;
+    setExporting(true);
+    try {
+      const saved = await saveTextFile(
+        highlightsMarkdown(article, highlights),
+        `papr-highlights-${articleId}.md`,
+        "Markdown",
+        ["md"],
+      );
+      if (saved) toast.show(t("highlights.exported"));
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <>
+      <button
+        className="tb-btn"
+        title={t(highlights.length === 0 ? "highlights.exportEmpty" : "highlights.exportMarkdown")}
+        aria-label={t("highlights.exportMarkdown")}
+        disabled={exporting || highlights.length === 0 || editingHl != null}
+        aria-busy={exporting}
+        onClick={exportHighlights}
+      >
+        <Icon name="arrow-down" size={16} />
+      </button>
       {toolbar && (
         <SelectionToolbar
           pos={toolbar}

@@ -331,6 +331,24 @@ pub async fn rename_feed(state: State<'_, AppState>, id: i64, title: String) -> 
     db::rename_feed(&conn, id, &title)
 }
 
+#[tauri::command]
+pub async fn update_feed(
+    state: State<'_, AppState>,
+    id: i64,
+    title: String,
+    feed_url: String,
+    folder_id: Option<i64>,
+    open_mode: Option<String>,
+) -> AppResult<()> {
+    if let Some(m) = &open_mode {
+        if m != "reader" && m != "extracted" && m != "web" {
+            return Err(AppError::other(format!("unknown open mode: {m}")));
+        }
+    }
+    let conn = state.db.lock().await;
+    db::update_feed(&conn, id, &title, &feed_url, folder_id, open_mode.as_deref())
+}
+
 /// Refresh every feed, streaming progress to the frontend over `on_progress`.
 #[tauri::command]
 pub async fn refresh_feeds(
@@ -565,20 +583,28 @@ fn valid_image(content_type: Option<&str>, bytes: &[u8]) -> bool {
     } else if bytes.starts_with(b"\0\0\x01\0") && bytes.len() >= 6 {
         "image/x-icon"
     } else if bytes.get(4..8) == Some(b"ftyp") && bytes.len() >= 16 {
-        // AVIF may use an AVIF major brand or list it among compatible brands.
+        // AVIF and HEIC/HEIF may use a specific major brand or list it among compatible brands.
         let box_len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
         if box_len < 16 || box_len > bytes.len() {
             return false;
         }
-        if !bytes[8..12].eq(b"avif")
-            && !bytes[8..12].eq(b"avis")
-            && !bytes[16..box_len]
-                .chunks_exact(4)
-                .any(|b| b == b"avif" || b == b"avis")
-        {
+        let has_brand = |targets: &[&[u8]]| {
+            targets.iter().any(|t| bytes[8..12].eq(*t))
+                || bytes[16..box_len]
+                    .chunks_exact(4)
+                    .any(|b| targets.iter().any(|t| b == *t))
+        };
+        if has_brand(&[b"avif", b"avis"]) {
+            "image/avif"
+        } else if has_brand(&[
+            b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis",
+        ]) {
+            "image/heic"
+        } else if has_brand(&[b"heif"]) {
+            "image/heif"
+        } else {
             return false;
         }
-        "image/avif"
     } else {
         let Ok(text) = std::str::from_utf8(bytes) else {
             return false;
@@ -610,6 +636,14 @@ fn valid_image(content_type: Option<&str>, bytes: &[u8]) -> bool {
         || mime == detected
         || (detected == "image/jpeg" && mime == "image/jpg")
         || (detected == "image/x-icon" && mime == "image/vnd.microsoft.icon")
+        || (detected == "image/heic"
+            && (mime == "image/heif"
+                || mime == "image/heic-sequence"
+                || mime == "image/heif-sequence"))
+        || (detected == "image/heif"
+            && (mime == "image/heic"
+                || mime == "image/heic-sequence"
+                || mime == "image/heif-sequence"))
 }
 
 /// Fetch through the shared client/proxy, trying none → image origin → article
@@ -681,6 +715,67 @@ async fn fetch_image_bytes(
     .map_err(|_| AppError::other("image download timed out"))?
 }
 
+/// Check if the image bytes belong to an ISOBMFF container for HEIC or HEIF.
+fn is_heic_or_heif(bytes: &[u8]) -> bool {
+    if bytes.get(4..8) == Some(b"ftyp") && bytes.len() >= 16 {
+        let box_len = match bytes[..4].try_into() {
+            Ok(b) => u32::from_be_bytes(b) as usize,
+            Err(_) => return false,
+        };
+        if box_len < 16 || box_len > bytes.len() {
+            return false;
+        }
+        let targets: &[&[u8]] = &[
+            b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"heif",
+        ];
+        targets.iter().any(|t| bytes[8..12].eq(*t))
+            || bytes[16..box_len]
+                .chunks_exact(4)
+                .any(|b| targets.iter().any(|t| b == *t))
+    } else {
+        false
+    }
+}
+
+/// Transcode HEIC/HEIF images into standard JPEG (or PNG if alpha is present).
+/// WebKitGTK (Linux) and WebView2 (Windows without HEVC extension) lack native
+/// HEIC decoders, so the webview cannot render HEIC data URLs directly.
+fn transcode_heic(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder};
+    use std::io::Cursor;
+    use zune_core::colorspace::ColorSpace;
+    use zune_heic::HeifDecoder;
+
+    let mut decoder = HeifDecoder::new(Cursor::new(bytes));
+    let raw = decoder.decode().ok()?;
+    let w = decoder.width()? as u32;
+    let h = decoder.height()? as u32;
+    let cs = decoder.colorspace();
+
+    let mut out = Vec::new();
+    match cs {
+        Some(ColorSpace::RGBA) => {
+            let encoder = PngEncoder::new(&mut out);
+            encoder.write_image(&raw, w, h, ColorType::Rgba8.into()).ok()?;
+        }
+        Some(ColorSpace::Luma) => {
+            let encoder = JpegEncoder::new_with_quality(&mut out, 85);
+            encoder.write_image(&raw, w, h, ColorType::L8.into()).ok()?;
+        }
+        Some(ColorSpace::LumaA) => {
+            let encoder = PngEncoder::new(&mut out);
+            encoder.write_image(&raw, w, h, ColorType::La8.into()).ok()?;
+        }
+        _ => {
+            let encoder = JpegEncoder::new_with_quality(&mut out, 85);
+            encoder.write_image(&raw, w, h, ColorType::Rgb8.into()).ok()?;
+        }
+    }
+    Some(out)
+}
+
 /// Fetch an image's bytes for the webview — the retry path for images the
 /// webview itself failed to load. See [`fetch_image_bytes`] for why the fetch
 /// lives in Rust.
@@ -691,7 +786,15 @@ pub async fn fetch_image(
     page_url: Option<String>,
 ) -> AppResult<Vec<u8>> {
     let http = state.http();
-    fetch_image_bytes(&http, &url, page_url.as_deref()).await
+    let bytes = fetch_image_bytes(&http, &url, page_url.as_deref()).await?;
+    // WebKitGTK and WebView2 typically lack native HEIC/HEIF decoders.
+    // Transcode to standard JPEG/PNG so the webview displays the image.
+    if is_heic_or_heif(&bytes) {
+        if let Some(transcoded) = transcode_heic(&bytes) {
+            return Ok(transcoded);
+        }
+    }
+    Ok(bytes)
 }
 
 /// The reader's "Save image" action. Fetches the bytes through the same
@@ -716,7 +819,9 @@ pub async fn save_image(
         .file()
         .add_filter(
             "Image",
-            &["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico"],
+            &[
+                "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "heic", "heif", "bmp", "ico",
+            ],
         )
         .set_file_name(image_filename(&url))
         .blocking_save_file();
@@ -1921,13 +2026,32 @@ mod tests {
             ("image/bmp", b"BM000000000000".as_slice()),
             ("image/vnd.microsoft.icon", b"\0\0\x01\0\x01\0".as_slice()),
             ("image/avif", b"\0\0\0\x14ftypmif1\0\0\0\0avif".as_slice()),
+            ("image/heic", b"\0\0\0\x14ftypmif1\0\0\0\0heic".as_slice()),
+            ("image/heif", b"\0\0\0\x14ftypmif1\0\0\0\0heif".as_slice()),
         ] {
             assert!(valid_image(Some(mime), signature), "{mime}");
         }
+        assert!(valid_image(
+            Some("image/heif"),
+            b"\0\0\0\x14ftypmif1\0\0\0\0heic"
+        ));
+        assert!(valid_image(
+            Some("image/heic"),
+            b"\0\0\0\x14ftypmif1\0\0\0\0heif"
+        ));
         assert!(!valid_image(
             Some("image/avif"),
             b"\0\0\0\x10ftypmif1\0\0\0\0"
         ));
+        assert!(!valid_image(
+            Some("image/heic"),
+            b"\0\0\0\x10ftypmif1\0\0\0\0"
+        ));
+        assert!(is_heic_or_heif(b"\0\0\0\x14ftypmif1\0\0\0\0heic"));
+        assert!(is_heic_or_heif(b"\0\0\0\x14ftypheic\0\0\0\0mif1"));
+        assert!(!is_heic_or_heif(b"\0\0\0\x14ftypmif1\0\0\0\0avif"));
+        assert!(!is_heic_or_heif(PNG));
+        assert!(transcode_heic(b"\0\0\0\x14ftypmif1\0\0\0\0heic").is_none());
         assert!(!valid_image(Some("text/html"), PNG));
         assert!(!valid_image(Some("image/jpeg"), PNG));
         assert!(!valid_image(

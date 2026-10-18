@@ -35,4 +35,8 @@ it("resolves article-relative paths and excludes executable/local schemes", () =
   expect(imageUrl("file:///etc/passwd")).toBeNull();
   expect(needsImageProxy("https://cdnfile.sspai.com/a")).toBe(true);
   expect(needsImageProxy("https://cdnfile.sspai.com.evil.test/a")).toBe(false);
+  expect(needsImageProxy("https://example.com/photo.heic")).toBe(true);
+  expect(needsImageProxy("https://example.com/photo.heif?w=800")).toBe(true);
+  expect(needsImageProxy("https://example.com/img?src=foo.heic")).toBe(true);
+  expect(needsImageProxy("https://example.com/photo.jpg")).toBe(false);
 });

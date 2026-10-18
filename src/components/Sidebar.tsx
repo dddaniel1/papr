@@ -12,6 +12,7 @@ import Icon, { type IconName } from "./Icon";
 import ContextMenu, { type MenuEntry } from "./ContextMenu";
 import FeedAvatar from "./FeedAvatar";
 import PromptDialog from "./PromptDialog";
+import EditFeedDialog from "./EditFeedDialog";
 
 interface Props {
   onAddFeed: () => void;
@@ -145,6 +146,7 @@ export default function Sidebar({
 
   const [menu, setMenu] = useState<Menu | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
+  const [editingFeed, setEditingFeed] = useState<Feed | null>(null);
   const [dragId, setDragId] = useState<number | null>(null);
   const [dropFolder, setDropFolder] = useState<number | "none" | null>(null);
   const [tagDragId, setTagDragId] = useState<number | null>(null);
@@ -291,24 +293,6 @@ export default function Sidebar({
 
   // ── feed / folder context menus ──
   const feedMenu = (f: Feed): MenuEntry[] => {
-    const moves: MenuEntry[] = allFolders
-      .filter((fo) => fo.id !== f.folderId)
-      .map((fo) => ({
-        icon: "folder" as const,
-        label: t("sidebar.moveToFolder", { folder: fo.name }),
-        onClick: () =>
-          guard(
-            api.moveFeed(f.id, fo.id),
-            t("sidebar.toastMovedTo", { folder: fo.name }),
-          ),
-      }));
-    if (f.folderId != null)
-      moves.push({
-        icon: "folder",
-        label: t("sidebar.moveOutOfFolder"),
-        onClick: () =>
-          guard(api.moveFeed(f.id, null), t("sidebar.toastMovedOut")),
-      });
     return [
       {
         icon: "check-all",
@@ -327,17 +311,9 @@ export default function Sidebar({
       { separator: true },
       {
         icon: "settings",
-        label: t("sidebar.renameMenu"),
-        onClick: () =>
-          setPrompt({
-            title: t("sidebar.renameFeedTitle"),
-            initial: f.title,
-            placeholder: t("sidebar.feedNamePlaceholder"),
-            onSubmit: (v) =>
-              guard(api.renameFeed(f.id, v), t("sidebar.toastRenamed")),
-          }),
+        label: t("sidebar.editFeedMenu"),
+        onClick: () => setEditingFeed(f),
       },
-      ...(moves.length ? [{ separator: true } as MenuEntry, ...moves] : []),
       { separator: true },
       {
         icon: "trash",
@@ -975,6 +951,14 @@ export default function Sidebar({
           placeholder={prompt.placeholder}
           onSubmit={prompt.onSubmit}
           onClose={() => setPrompt(null)}
+        />
+      )}
+      {editingFeed && (
+        <EditFeedDialog
+          feed={editingFeed}
+          folders={allFolders}
+          onClose={() => setEditingFeed(null)}
+          onToast={onToast}
         />
       )}
     </div>

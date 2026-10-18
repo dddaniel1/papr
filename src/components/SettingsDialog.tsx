@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cloneElement, isValidElement, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -73,6 +74,7 @@ export default function SettingsDialog({
   const [section, setSection] = useState(initialSection ?? "general");
   const feeds = useQuery({ queryKey: ["feeds"], queryFn: api.listFeeds });
   const windowRef = useRef<HTMLDivElement>(null);
+  const [contentEl, setContentEl] = useState<HTMLDivElement | null>(null);
   const version = useAppVersion();
   useFocusTrap(windowRef);
 
@@ -147,7 +149,7 @@ export default function SettingsDialog({
         >
           <Icon name="x" size={15} />
         </button>
-        <div className="settings-content">
+        <div className="settings-content" ref={setContentEl}>
           <div className="settings-header">
             <h2>{t(cur.labelKey)}</h2>
             <span className="sub">{subs[section]}</span>
@@ -162,6 +164,7 @@ export default function SettingsDialog({
                 feeds={feeds.data ?? []}
                 onToast={onToast}
                 onAddFeed={onAddFeed}
+                contentEl={contentEl}
               />
             )}
             {section === "filters" && (
@@ -793,22 +796,56 @@ function SubscriptionsSection({
   feeds,
   onToast,
   onAddFeed,
+  contentEl,
 }: {
   feeds: Feed[];
   onToast: (m: string) => void;
   onAddFeed: () => void;
+  contentEl?: HTMLDivElement | null;
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const actions = useArticleActions();
-  const [search, setSearch] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
-  const filtered = feeds.filter(
-    (f) => !search || f.title.toLowerCase().includes(search.toLowerCase()),
-  );
+  const folders = useQuery({ queryKey: ["folders"], queryFn: api.listFolders });
+  const folderMap = new Map((folders.data ?? []).map((f) => [f.id, f.name]));
 
-  // Per-feed refresh interval. "default" ⇒ null (follow the global setting),
-  // "off" ⇒ the 525600-minute sentinel, otherwise the literal minute count.
+  const [search, setSearch] = useState("");
+  const [folderFilter, setFolderFilter] = useState("all");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [lastClickedId, setLastClickedId] = useState<number | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const fileRef = useRef<HTMLInputElement>(null);
+  const headerCheckRef = useRef<HTMLInputElement>(null);
+
+  const filtered = feeds.filter((f) => {
+    if (search) {
+      const q = search.toLowerCase();
+      const titleMatch = f.title.toLowerCase().includes(q);
+      const urlMatch =
+        (f.siteUrl && f.siteUrl.toLowerCase().includes(q)) ||
+        (f.feedUrl && f.feedUrl.toLowerCase().includes(q));
+      if (!titleMatch && !urlMatch) return false;
+    }
+    if (folderFilter === "all") return true;
+    if (folderFilter === "none") return f.folderId === null;
+    return f.folderId === Number(folderFilter);
+  });
+
+  const allFilteredSelected =
+    filtered.length > 0 && filtered.every((f) => selectedIds.has(f.id));
+  const someFilteredSelected =
+    filtered.some((f) => selectedIds.has(f.id));
+
+  useEffect(() => {
+    if (headerCheckRef.current) {
+      headerCheckRef.current.indeterminate =
+        someFilteredSelected && !allFilteredSelected;
+    }
+  }, [someFilteredSelected, allFilteredSelected]);
+
+  // Per-feed refresh interval sentinel:
   const REFRESH_OFF = 525600;
   const intervalOptions = [
     { value: "default", label: t("settings.subscriptions.refreshDefault") },
@@ -820,38 +857,206 @@ function SubscriptionsSection({
     { value: "1440", label: t("settings.subscriptions.refresh1d") },
     { value: "off", label: t("settings.subscriptions.refreshOff") },
   ];
-  const intervalValue = (m: number | null) =>
-    m == null ? "default" : m >= REFRESH_OFF ? "off" : String(m);
-  const updateInterval = (f: Feed, v: string) => {
-    const minutes = v === "default" ? null : v === "off" ? REFRESH_OFF : Number(v);
-    api
-      .setFeedRefreshInterval(f.id, minutes)
-      .then(() => qc.invalidateQueries({ queryKey: ["feeds"] }))
-      .catch((e) => reportError(e));
-  };
-  // Per-feed auto-translate: opening an article from a feed with this on
-  // translates it into the configured target language straight away.
-  const updateAutoTranslate = (f: Feed, enabled: boolean) => {
-    api
-      .setFeedAutoTranslate(f.id, enabled)
-      .then(() => qc.invalidateQueries({ queryKey: ["feeds"] }))
-      .catch((e) => reportError(e));
-  };
-  // Per-feed open mode (issue #110): how the feed's articles open in the
-  // reader pane. "default" ⇒ null (reader view, honouring the global
-  // auto-extract preference).
+
   const openModeOptions = [
     { value: "default", label: t("settings.subscriptions.openDefault") },
     { value: "reader", label: t("settings.subscriptions.openReader") },
     { value: "extracted", label: t("settings.subscriptions.openExtracted") },
     { value: "web", label: t("settings.subscriptions.openWeb") },
   ];
-  const updateOpenMode = (f: Feed, v: string) => {
-    const mode = v === "default" ? null : (v as "reader" | "extracted" | "web");
-    api
-      .setFeedOpenMode(f.id, mode)
-      .then(() => qc.invalidateQueries({ queryKey: ["feeds"] }))
-      .catch((e) => reportError(e));
+
+  const intervalBadgeText = (m: number | null) => {
+    if (m == null) return t("settings.subscriptions.refreshDefault");
+    if (m >= REFRESH_OFF) return t("settings.subscriptions.refreshOff");
+    if (m < 60) return `${m}m`;
+    if (m < 1440) return `${Math.round(m / 60)}h`;
+    return `${Math.round(m / 1440)}d`;
+  };
+
+  const openModeBadgeText = (m: Feed["openMode"]) => {
+    if (!m) return null;
+    if (m === "reader") return t("settings.subscriptions.openReader");
+    if (m === "extracted") return t("settings.subscriptions.openExtracted");
+    if (m === "web") return t("settings.subscriptions.openWeb");
+    return null;
+  };
+
+  const toggleOne = (id: number, shiftKey: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (shiftKey && lastClickedId !== null) {
+        const lastIdx = filtered.findIndex((f) => f.id === lastClickedId);
+        const curIdx = filtered.findIndex((f) => f.id === id);
+        if (lastIdx !== -1 && curIdx !== -1) {
+          const [start, end] =
+            lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+          for (let i = start; i <= end; i++) {
+            next.add(filtered[i].id);
+          }
+          return next;
+        }
+      }
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    setLastClickedId(id);
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) {
+        filtered.forEach((f) => next.add(f.id));
+      } else {
+        filtered.forEach((f) => next.delete(f.id));
+      }
+      return next;
+    });
+  };
+
+  const handleInvertSelection = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      filtered.forEach((f) => {
+        if (next.has(f.id)) next.delete(f.id);
+        else next.add(f.id);
+      });
+      return next;
+    });
+  };
+
+  const handleBatchMoveFolder = async (folderIdStr: string) => {
+    if (!folderIdStr) return;
+    const targetFolderId = folderIdStr === "none" ? null : Number(folderIdStr);
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) => api.moveFeed(id, targetFolderId)),
+      );
+      await qc.invalidateQueries({ queryKey: ["feeds"] });
+      const folderName =
+        targetFolderId === null
+          ? null
+          : folders.data?.find((f) => f.id === targetFolderId)?.name;
+      onToast(
+        targetFolderId === null
+          ? t("settings.subscriptions.batchMovedRoot", {
+              count: selectedIds.size,
+            })
+          : t("settings.subscriptions.batchMoved", {
+              count: selectedIds.size,
+              folder: folderName ?? "",
+            }),
+      );
+      setSelectedIds(new Set());
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchInterval = async (v: string) => {
+    if (!v) return;
+    const minutes =
+      v === "default" ? null : v === "off" ? REFRESH_OFF : Number(v);
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) =>
+          api.setFeedRefreshInterval(id, minutes),
+        ),
+      );
+      await qc.invalidateQueries({ queryKey: ["feeds"] });
+      onToast(
+        t("settings.subscriptions.batchUpdated", { count: selectedIds.size }),
+      );
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchOpenMode = async (v: string) => {
+    if (!v) return;
+    const mode =
+      v === "default" ? null : (v as "reader" | "extracted" | "web");
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) => api.setFeedOpenMode(id, mode)),
+      );
+      await qc.invalidateQueries({ queryKey: ["feeds"] });
+      onToast(
+        t("settings.subscriptions.batchUpdated", { count: selectedIds.size }),
+      );
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchAutoTranslate = async (v: string) => {
+    if (!v) return;
+    const enabled = v === "on";
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) =>
+          api.setFeedAutoTranslate(id, enabled),
+        ),
+      );
+      await qc.invalidateQueries({ queryKey: ["feeds"] });
+      onToast(
+        t("settings.subscriptions.batchUpdated", { count: selectedIds.size }),
+      );
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchRefresh = async () => {
+    const count = selectedIds.size;
+    onToast(t("settings.subscriptions.batchRefreshing", { count }));
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((feedId) =>
+          api.refreshFeeds(undefined, { feedId }),
+        ),
+      );
+      await qc.invalidateQueries({ queryKey: ["feeds"] });
+      onToast(t("settings.subscriptions.batchRefreshed"));
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    const count = selectedIds.size;
+    setBusy(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) => api.deleteFeed(id)),
+      );
+      actions.refreshAfterBulk();
+      setSelectedIds(new Set());
+      onToast(t("settings.subscriptions.batchUnsubscribed", { count }));
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const exportOpml = async () => {
@@ -877,16 +1082,98 @@ function SubscriptionsSection({
     }
   };
 
-  const unsubscribe = (f: Feed) =>
-    api
-      .deleteFeed(f.id)
-      .then(() => {
-        // Unsubscribing touches only article-bearing caches — unlike OPML
-        // import, it needs no full invalidation.
-        actions.refreshAfterBulk();
-        onToast(t("settings.subscriptions.unsubscribed", { title: f.title }));
-      })
-      .catch((e) => reportError(e));
+  const dock = selectedIds.size > 0 ? (
+    <div className="s-batch-dock-wrap">
+      <div className="s-batch-dock">
+        <span className="s-batch-dock-pill">
+          {t("settings.subscriptions.selectedCount", { count: selectedIds.size })}
+        </span>
+        <button
+          className="s-btn"
+          onClick={handleInvertSelection}
+          disabled={busy}
+          title={t("settings.subscriptions.invertSelection")}
+        >
+          {t("settings.subscriptions.invertSelection")}
+        </button>
+        <button
+          className="s-btn"
+          onClick={() => setSelectedIds(new Set())}
+          disabled={busy}
+          title={t("settings.subscriptions.clearSelection")}
+        >
+          {t("settings.subscriptions.clearSelection")}
+        </button>
+        <div className="s-batch-dock-divider" />
+        <div className="s-batch-dock-actions">
+          <Select
+            value=""
+            disabled={busy}
+            options={[
+              { value: "", label: t("settings.subscriptions.batchMoveFolder") },
+              {
+                value: "none",
+                label: t("settings.subscriptions.noFolder"),
+              },
+              ...(folders.data ?? []).map((f) => ({
+                value: String(f.id),
+                label: f.name,
+              })),
+            ]}
+            onChange={handleBatchMoveFolder}
+            aria-label={t("settings.subscriptions.batchMoveFolder")}
+          />
+          <Select
+            value=""
+            disabled={busy}
+            options={[
+              { value: "", label: t("settings.subscriptions.batchInterval") },
+              ...intervalOptions,
+            ]}
+            onChange={handleBatchInterval}
+            aria-label={t("settings.subscriptions.batchInterval")}
+          />
+          <Select
+            value=""
+            disabled={busy}
+            options={[
+              { value: "", label: t("settings.subscriptions.batchOpenMode") },
+              ...openModeOptions,
+            ]}
+            onChange={handleBatchOpenMode}
+            aria-label={t("settings.subscriptions.batchOpenMode")}
+          />
+          <Select
+            value=""
+            disabled={busy}
+            options={[
+              { value: "", label: t("settings.subscriptions.batchAutoTranslate") },
+              { value: "on", label: t("settings.subscriptions.batchTranslateOn") },
+              { value: "off", label: t("settings.subscriptions.batchTranslateOff") },
+            ]}
+            onChange={handleBatchAutoTranslate}
+            aria-label={t("settings.subscriptions.batchAutoTranslate")}
+          />
+          <button
+            className="s-btn"
+            disabled={busy}
+            onClick={handleBatchRefresh}
+            title={t("settings.subscriptions.batchRefresh")}
+          >
+            <Icon name="refresh" size={12} />
+          </button>
+          <button
+            className="s-btn danger"
+            disabled={busy}
+            onClick={() => setConfirmDelete(true)}
+            title={t("settings.subscriptions.batchUnsubscribe")}
+          >
+            <Icon name="trash" size={12} />
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <>
@@ -906,6 +1193,7 @@ function SubscriptionsSection({
           <div
             className="subscription-search"
             style={{
+              flex: 1,
               display: "flex",
               alignItems: "center",
               gap: 8,
@@ -933,6 +1221,25 @@ function SubscriptionsSection({
               }}
             />
           </div>
+          <Select
+            value={folderFilter}
+            options={[
+              {
+                value: "all",
+                label: `${t("settings.subscriptions.folderFilterAll")} (${feeds.length})`,
+              },
+              ...(folders.data ?? []).map((f) => ({
+                value: String(f.id),
+                label: `${f.name} (${feeds.filter((feed) => feed.folderId === f.id).length})`,
+              })),
+              {
+                value: "none",
+                label: `${t("settings.subscriptions.folderFilterNone")} (${feeds.filter((feed) => feed.folderId == null).length})`,
+              },
+            ]}
+            onChange={(v) => setFolderFilter(v)}
+            aria-label={t("settings.subscriptions.columnFolder")}
+          />
           <button className="s-btn" onClick={() => fileRef.current?.click()}>
             <Icon name="arrow-down" size={12} /> {t("settings.subscriptions.importOpml")}
           </button>
@@ -944,56 +1251,107 @@ function SubscriptionsSection({
           </button>
         </div>
       </div>
+
+
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title={t("settings.subscriptions.batchUnsubscribeConfirmTitle", {
+            count: selectedIds.size,
+          })}
+          message={t("settings.subscriptions.batchUnsubscribeConfirmDesc", {
+            count: selectedIds.size,
+          })}
+          confirmLabel={t("settings.subscriptions.batchUnsubscribe")}
+          danger={true}
+          onConfirm={handleBatchDelete}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
+
       <RsshubInstanceGroup />
+
       <div className="settings-group">
         <h3 className="settings-group-title">
           {t("settings.subscriptions.feedsCount", { count: filtered.length })}
         </h3>
+
+        <div
+          className="s-feed-header-row"
+          style={{ cursor: "pointer" }}
+          onClick={(e) => {
+            if ((e.target as HTMLElement).tagName !== "INPUT") {
+              handleSelectAll(!allFilteredSelected);
+            }
+          }}
+        >
+          <input
+            ref={headerCheckRef}
+            type="checkbox"
+            className="s-feed-check"
+            checked={allFilteredSelected}
+            onChange={(e) => handleSelectAll(e.target.checked)}
+            onClick={(e) => e.stopPropagation()}
+            aria-label={t("settings.subscriptions.selectAll")}
+          />
+          <span className="col-feed">{t("settings.subscriptions.columnFeed")}</span>
+          <span className="col-meta">{t("settings.subscriptions.columnFolder")} / {t("settings.subscriptions.columnInterval")}</span>
+        </div>
+
         <div>
-          {filtered.map((f) => (
-            <div key={f.id} className="s-feed-row">
-              <FeedAvatar
-                title={f.title}
-                faviconUrl={f.faviconUrl}
-                seed={f.id}
-                style={{ width: 22, height: 22, borderRadius: 5 }}
-              />
-              <span className="name">{f.title}</span>
-              <span className="url">{feedHost(f)}</span>
-              <div className="actions">
-                <label
-                  className="s-feed-autotr"
-                  title={t("settings.subscriptions.autoTranslateDesc")}
-                >
-                  <Icon name="globe" size={13} color="var(--muted)" />
-                  <Toggle
-                    checked={f.autoTranslate}
-                    onChange={(v) => updateAutoTranslate(f, v)}
-                    aria-label={t("settings.subscriptions.autoTranslate")}
-                  />
-                </label>
-                <Select
-                  value={f.openMode ?? "default"}
-                  options={openModeOptions}
-                  onChange={(v) => updateOpenMode(f, v)}
-                  aria-label={t("settings.subscriptions.openMode")}
+          {filtered.map((f) => {
+            const folderName = f.folderId != null ? folderMap.get(f.folderId) : null;
+            const isSelected = selectedIds.has(f.id);
+            return (
+              <div
+                key={f.id}
+                className={`s-feed-row ${isSelected ? "selected" : ""}`}
+                onClick={(e) => toggleOne(f.id, e.shiftKey)}
+              >
+                <input
+                  type="checkbox"
+                  className="s-feed-check"
+                  checked={isSelected}
+                  onChange={() => {}}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleOne(f.id, e.shiftKey);
+                  }}
+                  aria-label={f.title}
                 />
-                <Select
-                  value={intervalValue(f.refreshIntervalMin)}
-                  options={intervalOptions}
-                  onChange={(v) => updateInterval(f, v)}
-                  aria-label={t("settings.subscriptions.refreshInterval")}
+                <FeedAvatar
+                  title={f.title}
+                  faviconUrl={f.faviconUrl}
+                  seed={f.id}
+                  style={{ width: 22, height: 22, borderRadius: 5 }}
                 />
-                <button
-                  className="icon-btn"
-                  title={t("settings.subscriptions.unsubscribe")}
-                  onClick={() => unsubscribe(f)}
-                >
-                  <Icon name="trash" size={13} />
-                </button>
+                <span className="name" title={f.title}>{f.title}</span>
+                <span className="s-feed-badge">
+                  <Icon name="folder" size={11} color="var(--muted)" />
+                  {folderName ?? t("settings.subscriptions.noFolder")}
+                </span>
+                <span className="url">{feedHost(f)}</span>
+                <div className="s-feed-badges">
+                  {f.autoTranslate && (
+                    <span
+                      className="s-feed-badge"
+                      title={t("settings.subscriptions.autoTranslate")}
+                    >
+                      <Icon name="globe" size={11} color="var(--accent)" />
+                    </span>
+                  )}
+                  {f.openMode && (
+                    <span className="s-feed-badge">
+                      {openModeBadgeText(f.openMode)}
+                    </span>
+                  )}
+                  <span className="s-feed-badge">
+                    {intervalBadgeText(f.refreshIntervalMin)}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           {filtered.length === 0 && (
             <div
               style={{ padding: "16px 4px", fontSize: 13, color: "var(--muted)" }}
@@ -1003,6 +1361,8 @@ function SubscriptionsSection({
           )}
         </div>
       </div>
+
+      {contentEl && dock ? createPortal(dock, contentEl) : dock}
     </>
   );
 }
