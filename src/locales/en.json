@@ -187,6 +187,8 @@
     "textCopied": "Copied",
     "imageAddressCopied": "Image address copied",
     "imageSaveFailed": "Couldn't save the image",
+    "imageLoadFailed": "Image couldn't load",
+    "openOriginalImage": "Open original image",
     "imageSaved": "Image saved",
     "loadError": "Couldn't load this article",
     "emptySelectArticle": "Select an article to start reading",

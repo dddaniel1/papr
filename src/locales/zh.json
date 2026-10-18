@@ -187,6 +187,8 @@
     "textCopied": "已复制",
     "imageAddressCopied": "图片地址已复制",
     "imageSaveFailed": "图片保存失败",
+    "imageLoadFailed": "图片加载失败",
+    "openOriginalImage": "打开原图",
     "imageSaved": "图片已保存",
     "loadError": "无法加载这篇文章",
     "emptySelectArticle": "选择一篇文章开始阅读",

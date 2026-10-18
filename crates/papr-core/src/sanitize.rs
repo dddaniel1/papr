@@ -6,6 +6,8 @@ use ego_tree::iter::Edge;
 use lol_html::{element, rewrite_str, RewriteStrSettings};
 use scraper::node::Node;
 use scraper::{Html, Selector};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::LazyLock;
 use url::Url;
 
@@ -34,7 +36,16 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
         .add_tags(["video", "source"])
         .add_tag_attributes(
             "video",
-            ["src", "poster", "width", "height", "preload", "loop", "muted", "playsinline"],
+            [
+                "src",
+                "poster",
+                "width",
+                "height",
+                "preload",
+                "loop",
+                "muted",
+                "playsinline",
+            ],
         )
         .add_tag_attributes("source", ["src", "type", "media"])
         // Always expose player controls: a feed clip with no `controls` (and no
@@ -70,11 +81,36 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
 /// so ammonia still has the final say on safety; a rewrite failure falls back
 /// to the original HTML.
 fn promote_lazy_images(html: &str) -> String {
-    let handler = element!("img", |el| {
-        let has_real_src = el.get_attribute("src").is_some_and(|s| {
-            let s = s.trim();
-            !s.is_empty() && !s.starts_with("data:")
-        });
+    let pictures = Rc::new(RefCell::new(Vec::<Option<String>>::new()));
+    let picture_state = pictures.clone();
+    let source_state = pictures.clone();
+    let picture = element!("picture", move |el: &mut lol_html::html_content::Element| {
+        picture_state.borrow_mut().push(None);
+        let state = picture_state.clone();
+        if let Some(handlers) = el.end_tag_handlers() {
+            handlers.push(Box::new(move |_| {
+                state.borrow_mut().pop();
+                Ok(())
+            }));
+        }
+        Ok(())
+    });
+    let source = element!("picture source", move |el| {
+        if let Some(candidate) = source_state.borrow_mut().last_mut() {
+            if candidate.is_none() {
+                *candidate = ["data-srcset", "srcset"]
+                    .iter()
+                    .filter_map(|a| el.get_attribute(a))
+                    .find_map(|s| image_from_srcset(&s));
+            }
+        }
+        Ok(())
+    });
+    let image = element!("img", move |el| {
+        let has_real_src = el
+            .get_attribute("src")
+            .and_then(|s| image_candidate(&s))
+            .is_some();
         if !has_real_src {
             let recovered = [
                 "data-src",
@@ -83,22 +119,17 @@ fn promote_lazy_images(html: &str) -> String {
                 "data-lazy-src",
             ]
             .iter()
-            .find_map(|a| el.get_attribute(a))
+            .filter_map(|a| el.get_attribute(a))
+            .find_map(|s| image_candidate(&s))
             .or_else(|| {
-                // `srcset` is "url1 1x, url2 2x" / "url1 480w, …" — take the
-                // first candidate's URL.
-                el.get_attribute("srcset").and_then(|ss| {
-                    ss.split(',')
-                        .next()
-                        .and_then(|c| c.split_whitespace().next())
-                        .map(str::to_string)
-                })
-            });
+                ["data-srcset", "srcset"]
+                    .iter()
+                    .filter_map(|a| el.get_attribute(a))
+                    .find_map(|s| image_from_srcset(&s))
+            })
+            .or_else(|| pictures.borrow().last().cloned().flatten());
             if let Some(url) = recovered {
-                let url = url.trim();
-                if !url.is_empty() {
-                    let _ = el.set_attribute("src", url);
-                }
+                let _ = el.set_attribute("src", &url);
             }
         }
         Ok(())
@@ -106,11 +137,69 @@ fn promote_lazy_images(html: &str) -> String {
     rewrite_str(
         html,
         RewriteStrSettings {
-            element_content_handlers: vec![handler],
+            element_content_handlers: vec![picture, source, image],
             ..Default::default()
         },
     )
     .unwrap_or_else(|_| html.to_string())
+}
+
+/// Only recover plausible web images; ammonia still validates the final URL.
+fn image_candidate(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('#') {
+        return None;
+    }
+    let parsed = Url::parse(value)
+        .or_else(|_| Url::parse("https://relative.invalid/").unwrap().join(value))
+        .ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    // Restrict placeholder detection to common filenames, not arbitrary URL substrings.
+    let filename = parsed
+        .path()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let stem = filename.split('.').next().unwrap_or("");
+    if [
+        "placeholder",
+        "image-placeholder",
+        "placeholder-image",
+        "spacer",
+        "blank",
+        "transparent",
+        "pixel",
+        "1x1",
+        "loading",
+        "lazy",
+    ]
+    .contains(&stem)
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn image_from_srcset(srcset: &str) -> Option<String> {
+    let mut tokens = srcset.split_ascii_whitespace();
+    while let Some(token) = tokens.next() {
+        // Commas within a URL (including data URLs) belong to that URL. A trailing
+        // comma or the comma after a descriptor separates candidates.
+        if let Some(url) = image_candidate(token.trim_end_matches(',')) {
+            return Some(url);
+        }
+        if !token.ends_with(',') {
+            for descriptor in tokens.by_ref() {
+                if descriptor.ends_with(',') {
+                    break;
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Tags whose text content is dropped wholesale (it isn't human-readable copy).
@@ -471,6 +560,107 @@ mod tests {
         assert!(
             !out.contains("other.jpg"),
             "data-src wrongly overrode src: {out}"
+        );
+    }
+
+    #[test]
+    fn lazy_candidates_replace_only_recognized_http_placeholders() {
+        for placeholder in [
+            "https://ex.com/assets/placeholder.gif?v=1",
+            "/images/spacer.png",
+            "//ex.com/blank.gif",
+        ] {
+            let html =
+                format!(r#"<img src="{placeholder}" data-src="" data-original="../real.jpg">"#);
+            let out = sanitize(&html, Some("https://example.com/posts/story/"));
+            assert_eq!(
+                first_image(&out).as_deref(),
+                Some("https://example.com/posts/real.jpg"),
+                "{out}"
+            );
+        }
+        for real in [
+            "https://ex.com/loading-a-truck.jpg",
+            "/photos/placeholder-art.jpg",
+        ] {
+            let out = sanitize(
+                &format!(r#"<img src="{real}" data-original="https://ex.com/other.jpg">"#),
+                Some("https://example.com/"),
+            );
+            assert!(!out.contains("other.jpg"), "{out}");
+        }
+    }
+
+    #[test]
+    fn srcset_skips_unusable_candidates_and_preserves_url_commas() {
+        for attribute in ["data-srcset", "srcset"] {
+            let out = sanitize(
+                &format!(
+                    r#"<img data-src="javascript:evil()" {attribute}="data:image/gif;base64,AAAA 1x, /placeholder.gif 2x, //cdn.example.com/image,large.jpg 3x">"#
+                ),
+                Some("https://example.com/post/"),
+            );
+            assert_eq!(
+                first_image(&out).as_deref(),
+                Some("https://cdn.example.com/image,large.jpg"),
+                "{out}"
+            );
+            assert!(!out.contains("javascript:"), "{out}");
+        }
+    }
+
+    #[test]
+    fn picture_sources_supply_missing_images_without_leaking_to_other_images() {
+        let out = sanitize(
+            r#"
+            <picture><source srcset="javascript:evil() 1x"><source data-srcset="/first.webp 1x"><img src="/blank.gif" onerror="evil()"></picture>
+            <img><video><source src="/movie.mp4"></video>
+            <picture><source srcset="/second.webp 1x"><img src="/real.jpg"></picture>
+            <picture><source srcset="/third.webp 1x"><img></picture>"#,
+            Some("https://example.com/posts/"),
+        );
+        let doc = Html::parse_fragment(&out);
+        let sources: Vec<_> = doc
+            .select(&IMG_SELECTOR)
+            .map(|el| el.value().attr("src").map(str::to_string))
+            .collect();
+        assert_eq!(
+            sources,
+            vec![
+                Some("https://example.com/first.webp".into()),
+                None,
+                Some("https://example.com/real.jpg".into()),
+                Some("https://example.com/third.webp".into())
+            ]
+        );
+        assert!(
+            out.contains(r#"src="https://example.com/movie.mp4""#),
+            "{out}"
+        );
+        assert!(
+            !out.contains("onerror") && !out.contains("javascript:"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn recovered_images_cannot_bypass_sanitization() {
+        let out = sanitize(
+            r#"<img src="javascript:evil()" data-src="JAVASCRIPT:evil()" data-original=" /safe.jpg?x=1&amp;y=2 " onload="evil()"><img data-src="data:text/html,evil"><img data-src="vbscript:evil()">"#,
+            Some("https://example.com/"),
+        );
+        assert_eq!(
+            first_image(&out).as_deref(),
+            Some("https://example.com/safe.jpg?x=1&y=2"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("onload")
+                && !out.contains("javascript:")
+                && !out.contains("JAVASCRIPT:")
+                && !out.contains("vbscript:")
+                && !out.contains("data:text"),
+            "{out}"
         );
     }
 

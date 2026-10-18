@@ -14,6 +14,7 @@ import { reportError, toast } from "../toast";
 import { clampToViewport } from "../lib/viewport";
 import type { ArticleSummary, Feed } from "../types";
 import Icon from "./Icon";
+import ArticleImage from "./ArticleImage";
 import ContextMenu, { type MenuEntry } from "./ContextMenu";
 
 const PAGE = 60;
@@ -752,25 +753,17 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
   );
 }
 
-/** Card-view thumbnail: the article image, or nothing. When a card has no
- *  usable image — none supplied and none extractable from the body, or the
- *  image fails to load — the card simply renders without a thumbnail rather
- *  than showing a generic placeholder. */
+/** Thumbnails share the reader's image recovery and retry behavior. */
 function CardThumb({ article }: { article: ArticleSummary }) {
-  const [broken, setBroken] = useState(false);
-  // The virtualizer recycles this instance across rows — clear the error
-  // flag whenever the image URL changes.
-  useEffect(() => setBroken(false), [article.imageUrl]);
-
-  if (!article.imageUrl || broken) return null;
-
+  if (!article.imageUrl) return null;
   return (
     <div className="art-thumb">
-      <img
+      <ArticleImage
+        key={`${article.id}:${article.imageUrl}`}
         src={article.imageUrl}
+        pageUrl={article.url}
         alt=""
         loading="lazy"
-        onError={() => setBroken(true)}
         style={{
           position: "absolute",
           inset: 0,

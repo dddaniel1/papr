@@ -109,9 +109,7 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
 /// to the top of the newest-first list permanently, burying genuinely recent
 /// articles. A 24-hour grace window absorbs harmless publisher/client clock
 /// skew; anything beyond it is clamped down to "now".
-pub fn clamp_publish_date(
-    date: chrono::DateTime<chrono::Utc>,
-) -> chrono::DateTime<chrono::Utc> {
+pub fn clamp_publish_date(date: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     let now = chrono::Utc::now();
     let cutoff = now + chrono::Duration::hours(24);
     if date > cutoff {
@@ -164,7 +162,22 @@ fn map_entry(e: &Entry, base: &str) -> Option<NewArticle> {
     let content_html = if raw_html.is_empty() {
         None
     } else {
-        Some(sanitize::sanitize(&raw_html, Some(base)))
+        // feed-rs exposes Atom content xml:base on Entry and RSS content:encoded
+        // xml:base as Content.src. Otherwise body paths belong to the article.
+        let explicit_base = e
+            .content
+            .as_ref()
+            .filter(|c| c.body.is_some())
+            .and_then(|c| {
+                e.base
+                    .as_deref()
+                    .or_else(|| c.src.as_ref().map(|s| s.href.as_str()))
+            });
+        let content_base = explicit_base
+            .map(|b| resolve_url(b, base))
+            .or_else(|| url.clone())
+            .unwrap_or_else(|| base.to_string());
+        Some(sanitize::sanitize(&raw_html, Some(&content_base)))
     };
     let body_text = sanitize::html_to_text(&raw_html);
 
@@ -293,9 +306,12 @@ pub fn refine_source_type(initial: SourceType, parsed: &ParsedFeed, feed_url: &s
         return initial;
     }
     let has_audio = parsed.articles.iter().any(|a| {
-        a.enclosures
-            .iter()
-            .any(|e| e.mime_type.as_deref().map(|m| m.starts_with("audio")).unwrap_or(false))
+        a.enclosures.iter().any(|e| {
+            e.mime_type
+                .as_deref()
+                .map(|m| m.starts_with("audio"))
+                .unwrap_or(false)
+        })
     });
     if has_audio {
         return SourceType::Podcast;
@@ -480,6 +496,65 @@ mod tests {
         let enc = &parsed.articles[0].enclosures;
         assert_eq!(enc.len(), 1, "uppercase-typed audio enclosure must survive");
         assert_eq!(enc[0].mime_type.as_deref(), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn body_images_resolve_against_article_link_and_fall_back_without_one() {
+        let rss = br#"<rss version="2.0"><channel><title>Feed</title><link>https://example.com/site/</link>
+            <item><title>With link</title><link>/posts/story/index.html</link><description><![CDATA[<img data-src="images/photo.jpg">]]></description></item>
+            <item><title>No link</title><description><![CDATA[<img src="images/fallback.jpg">]]></description></item>
+            </channel></rss>"#;
+        let parsed = super::parse_feed(rss, "https://feeds.example.com/rss").unwrap();
+        assert_eq!(
+            parsed.articles[0].url.as_deref(),
+            Some("https://example.com/posts/story/index.html")
+        );
+        assert_eq!(
+            parsed.articles[0].image_url.as_deref(),
+            Some("https://example.com/posts/story/images/photo.jpg")
+        );
+        assert!(parsed.articles[0]
+            .content_html
+            .as_deref()
+            .unwrap()
+            .contains("https://example.com/posts/story/images/photo.jpg"));
+        assert_eq!(
+            parsed.articles[1].image_url.as_deref(),
+            Some("https://example.com/site/images/fallback.jpg")
+        );
+    }
+
+    #[test]
+    fn atom_content_xml_base_takes_precedence_over_article_link() {
+        for (base, expected) in [
+            (
+                "https://cdn.example.com/assets/",
+                "https://cdn.example.com/assets/photo.jpg",
+            ),
+            ("/assets/", "https://example.com/assets/photo.jpg"),
+        ] {
+            let atom = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>Feed</title><id>feed</id><updated>2026-01-01T00:00:00Z</updated>
+                <link href="https://example.com/site/"/>
+                <entry><id>post</id><title>Post</title><link href="https://example.com/posts/story/"/>
+                <content type="html" xml:base="{base}">&lt;img src="photo.jpg"&gt;</content></entry></feed>"#
+            );
+            let parsed = super::parse_feed(atom.as_bytes(), "https://example.com/feed").unwrap();
+            assert_eq!(parsed.articles[0].image_url.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn rss_encoded_content_xml_base_takes_precedence_over_article_link() {
+        let rss = br#"<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Feed</title>
+            <item><title>Post</title><link>https://example.com/posts/story/</link>
+            <content:encoded xml:base="https://cdn.example.com/assets/"><![CDATA[<picture><source srcset="photo.jpg 1x"><img></picture>]]></content:encoded>
+            </item></channel></rss>"#;
+        let parsed = super::parse_feed(rss, "https://example.com/feed").unwrap();
+        assert_eq!(
+            parsed.articles[0].image_url.as_deref(),
+            Some("https://cdn.example.com/assets/photo.jpg")
+        );
     }
 
     // A CNKI-style feed: no `<guid>`, and every `<link>` carries a per-request

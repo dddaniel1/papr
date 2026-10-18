@@ -2136,6 +2136,65 @@ button { font-family: inherit; }
   cursor: zoom-in;
 }
 
+.image-failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 12px 14px;
+  margin: 1.2em 0;
+  box-sizing: border-box;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 12px/1.5 var(--ui);
+}
+.image-failure-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.image-failure-message { flex: 1 1 auto; }
+.image-failure button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+.image-failure .image-failure-retry {
+  color: var(--ink);
+  background: var(--hover);
+  font-weight: 500;
+}
+.image-failure button:hover { color: var(--ink); background: var(--hover); }
+.image-failure button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.art.card .art-thumb:has(.image-failure) { aspect-ratio: auto; background: transparent; }
+.art-thumb .image-failure {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  margin: 0;
+  padding: 10px;
+  border: 0;
+}
+.art-thumb .image-failure-open { grid-column: 2 / -1; justify-self: start; padding-inline: 0; }
+.art-thumb .image-failure-retry { margin-left: 0; }
+@media (max-width: 420px) {
+  .image-failure { gap: 4px 8px; padding: 10px; }
+  .image-failure-message { flex-basis: calc(100% - 30px); }
+  .image-failure-retry { margin-left: 26px; }
+}
+
 /* Full-screen image viewer (issue #87) */
 .lightbox {
   position: fixed;

@@ -538,43 +538,147 @@ fn referer_candidates(image_url: &str, page_url: Option<&str>) -> Vec<Option<Str
     out
 }
 
-/// Fetch a feed image's bytes.
-///
-/// Done in Rust rather than via the webview so the request's `Referer` can be
-/// controlled: it walks [`referer_candidates`] (none → image origin → article
-/// URL) until the host serves the image, which covers both blacklist- and
-/// whitelist-style hotlink protection. `page_url` is the article's link, used
-/// as the final candidate. Transport errors abort the chain — a different
-/// Referer can't fix an unreachable host — only HTTP status errors advance it.
+// Shared by fetch and save, including callers waiting for a download slot.
+static IMAGE_DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+const IMAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Require a known image signature, even when a CDN labels an HTML challenge
+/// as image/*. Missing/generic MIME types are common on otherwise valid images.
+fn valid_image(content_type: Option<&str>, bytes: &[u8]) -> bool {
+    let mime = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let detected = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else if bytes.starts_with(b"BM") && bytes.len() >= 14 {
+        "image/bmp"
+    } else if bytes.starts_with(b"\0\0\x01\0") && bytes.len() >= 6 {
+        "image/x-icon"
+    } else if bytes.get(4..8) == Some(b"ftyp") && bytes.len() >= 16 {
+        // AVIF may use an AVIF major brand or list it among compatible brands.
+        let box_len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        if box_len < 16 || box_len > bytes.len() {
+            return false;
+        }
+        if !bytes[8..12].eq(b"avif")
+            && !bytes[8..12].eq(b"avis")
+            && !bytes[16..box_len]
+                .chunks_exact(4)
+                .any(|b| b == b"avif" || b == b"avis")
+        {
+            return false;
+        }
+        "image/avif"
+    } else {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return false;
+        };
+        let mut text = text.trim_start_matches('\u{feff}').trim_start();
+        if text.starts_with("<?xml") {
+            let Some((_, rest)) = text.split_once("?>") else {
+                return false;
+            };
+            text = rest.trim_start();
+        }
+        while text.starts_with("<!--") {
+            let Some((_, rest)) = text.split_once("-->") else {
+                return false;
+            };
+            text = rest.trim_start();
+        }
+        if !text.strip_prefix("<svg").is_some_and(|rest| {
+            rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        }) || !(text.trim_end().ends_with("</svg>") || text.trim_end().ends_with("/>"))
+        {
+            return false;
+        }
+        "image/svg+xml"
+    };
+    mime.is_empty()
+        || mime == "application/octet-stream"
+        || mime == "binary/octet-stream"
+        || mime == detected
+        || (detected == "image/jpeg" && mime == "image/jpg")
+        || (detected == "image/x-icon" && mime == "image/vnd.microsoft.icon")
+}
+
+/// Fetch through the shared client/proxy, trying none → image origin → article
+/// Referers. Only validated images succeed; transport errors abort the walk.
 async fn fetch_image_bytes(
     http: &reqwest::Client,
     url: &str,
     page_url: Option<&str>,
 ) -> AppResult<Vec<u8>> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let parsed = Url::parse(url).map_err(|_| AppError::code("badImageUrl"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(AppError::code("badImageUrl"));
     }
-    let mut last_err = AppError::code("badImageUrl");
-    for referer in referer_candidates(url, page_url) {
-        let mut req = http.get(url).header("User-Agent", IMAGE_UA);
-        if let Some(r) = &referer {
-            req = req.header("Referer", r.as_str());
-        }
-        match req.send().await?.error_for_status() {
-            Err(e) => last_err = e.into(),
-            Ok(resp) => {
-                if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES) {
-                    return Err(AppError::code("imageTooLarge"));
-                }
-                let bytes = resp.bytes().await?;
-                if bytes.len() as u64 > MAX_IMAGE_BYTES {
-                    return Err(AppError::code("imageTooLarge"));
-                }
-                return Ok(bytes.to_vec());
+    tokio::time::timeout(IMAGE_FETCH_TIMEOUT, async {
+        let _permit = IMAGE_DOWNLOADS
+            .acquire()
+            .await
+            .map_err(|_| AppError::other("image download queue closed"))?;
+        let mut last_err = AppError::other("response was not an image");
+        for referer in referer_candidates(url, page_url) {
+            let mut req = http.get(url).header("User-Agent", IMAGE_UA);
+            if let Some(r) = &referer {
+                req = req.header("Referer", r.as_str());
             }
+            // Strip the URL before errors can reach frontend diagnostics/logs.
+            let mut resp = req
+                .send()
+                .await
+                .map_err(|e| AppError::from(e.without_url()))?;
+            let status = resp.status();
+            if let Err(e) = resp.error_for_status_ref() {
+                last_err = e.without_url().into();
+                if matches!(status.as_u16(), 401 | 403 | 418 | 429) || status.is_server_error() {
+                    continue;
+                }
+                return Err(last_err);
+            }
+            if !status.is_success() {
+                return Err(AppError::other(format!(
+                    "image request returned HTTP {status}"
+                )));
+            }
+            if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES) {
+                return Err(AppError::code("imageTooLarge"));
+            }
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap_or("invalid").to_owned());
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| AppError::from(e.without_url()))?
+            {
+                if chunk.len() > MAX_IMAGE_BYTES as usize - bytes.len() {
+                    return Err(AppError::code("imageTooLarge"));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if valid_image(content_type.as_deref(), &bytes) {
+                return Ok(bytes);
+            }
+            last_err = AppError::other("response was not an image");
         }
-    }
-    Err(last_err)
+        Err(last_err)
+    })
+    .await
+    .map_err(|_| AppError::other("image download timed out"))?
 }
 
 /// Fetch an image's bytes for the webview — the retry path for images the
@@ -1795,6 +1899,170 @@ mod tests {
     #[test]
     fn text_for_selector_returns_empty_when_the_tag_is_absent() {
         assert_eq!(text_for_selector("<p>body only</p>", "h1"), "");
+    }
+
+    // --- image validation and the actual HTTP Referer walk. ---
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nimage fixture";
+
+    #[test]
+    fn image_validation_checks_mime_and_signature() {
+        assert!(valid_image(Some("image/png; charset=binary"), PNG));
+        assert!(valid_image(None, PNG));
+        assert!(valid_image(Some("application/octet-stream"), PNG));
+        assert!(valid_image(
+            Some("image/svg+xml"),
+            b"<?xml version='1.0'?> <!--logo--> <svg/>"
+        ));
+        for (mime, signature) in [
+            ("image/jpeg", b"\xff\xd8\xff".as_slice()),
+            ("image/gif", b"GIF89a".as_slice()),
+            ("image/webp", b"RIFF\x04\0\0\0WEBP".as_slice()),
+            ("image/bmp", b"BM000000000000".as_slice()),
+            ("image/vnd.microsoft.icon", b"\0\0\x01\0\x01\0".as_slice()),
+            ("image/avif", b"\0\0\0\x14ftypmif1\0\0\0\0avif".as_slice()),
+        ] {
+            assert!(valid_image(Some(mime), signature), "{mime}");
+        }
+        assert!(!valid_image(
+            Some("image/avif"),
+            b"\0\0\0\x10ftypmif1\0\0\0\0"
+        ));
+        assert!(!valid_image(Some("text/html"), PNG));
+        assert!(!valid_image(Some("image/jpeg"), PNG));
+        assert!(!valid_image(
+            Some("image/png"),
+            b"<!doctype html><html>blocked</html>"
+        ));
+        assert!(!valid_image(Some("image/svg+xml"), b"<html><svg/></html>"));
+        assert!(!valid_image(Some("image/png"), b""));
+    }
+
+    // Each response gets a fresh connection, making the request sequence visible.
+    async fn image_fixture(
+        responses: Vec<(&'static str, &'static str, Vec<u8>)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/image?private=secret",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, headers, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() < 8192);
+                }
+                requests.push(String::from_utf8(request).unwrap().to_ascii_lowercase());
+                let response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n{headers}\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                // A size rejection may close the connection before this finishes.
+                let _ = socket.write_all(&body).await;
+            }
+            requests
+        });
+        (url, server)
+    }
+
+    fn image_test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn image_fetch_walks_past_html_200_and_forbidden_to_article() {
+        let (url, server) = image_fixture(vec![
+            (
+                "200 OK",
+                "Content-Type: image/png\r\n",
+                b"<html>challenge</html>".to_vec(),
+            ),
+            ("403 Forbidden", "", vec![]),
+            ("200 OK", "Content-Type: image/png\r\n", PNG.to_vec()),
+        ])
+        .await;
+        let page = "https://article.example/post";
+        assert_eq!(
+            fetch_image_bytes(&image_test_client(), &url, Some(page))
+                .await
+                .unwrap(),
+            PNG
+        );
+        let requests = server.await.unwrap();
+        assert!(!requests[0].contains("\r\nreferer:"));
+        let origin = Url::parse(&url).unwrap().origin().ascii_serialization();
+        assert!(requests[1].contains(&format!("\r\nreferer: {origin}/\r\n")));
+        assert!(requests[2].contains(&format!("\r\nreferer: {page}\r\n")));
+    }
+
+    #[tokio::test]
+    async fn image_fetch_retries_418_with_image_origin_referer() {
+        let (url, server) = image_fixture(vec![
+            ("418 I'm a teapot", "", vec![]),
+            ("200 OK", "Content-Type: image/png\r\n", PNG.to_vec()),
+        ])
+        .await;
+        assert_eq!(
+            fetch_image_bytes(&image_test_client(), &url, Some("https://article.example/"))
+                .await
+                .unwrap(),
+            PNG
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].contains("\r\nreferer:"));
+        let origin = Url::parse(&url).unwrap().origin().ascii_serialization();
+        assert!(requests[1].contains(&format!("\r\nreferer: {origin}/\r\n")));
+    }
+
+    #[tokio::test]
+    async fn image_fetch_stops_at_first_valid_image() {
+        let (url, server) = image_fixture(vec![(
+            "200 OK",
+            "Content-Type: application/octet-stream\r\n",
+            PNG.to_vec(),
+        )])
+        .await;
+        assert_eq!(
+            fetch_image_bytes(&image_test_client(), &url, Some("https://article.example/"))
+                .await
+                .unwrap(),
+            PNG
+        );
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn image_fetch_stops_on_404_and_removes_url_from_errors() {
+        let (url, server) = image_fixture(vec![("404 Not Found", "", vec![])]).await;
+        let error = fetch_image_bytes(&image_test_client(), &url, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, AppError::Http(e) if e.status() == Some(reqwest::StatusCode::NOT_FOUND) && e.url().is_none())
+        );
+        assert!(!error.to_string().contains("private"));
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn image_fetch_limits_stream_without_content_length() {
+        let mut body = vec![0; MAX_IMAGE_BYTES as usize + 1];
+        body[..PNG.len()].copy_from_slice(PNG);
+        let (url, server) =
+            image_fixture(vec![("200 OK", "Content-Type: image/png\r\n", body)]).await;
+        let error = fetch_image_bytes(&image_test_client(), &url, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Coded("imageTooLarge")));
+        server.await.unwrap();
     }
 
     // --- referer_candidates: the Referer fallback chain for image fetches. ---

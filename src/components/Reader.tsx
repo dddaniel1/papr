@@ -9,7 +9,8 @@ import { usePlayer } from "../player";
 import { useTranslationJobs } from "../translation";
 import { useArticleActions } from "../hooks/articleActions";
 import { renderMarkdown } from "../lib/markdown";
-import { imageDataUrl } from "../lib/imageBytes";
+import { normalizeImageHtml, watchImage } from "../lib/imageLoading";
+import ArticleImage from "./ArticleImage";
 import { fullDate } from "../lib/feedMeta";
 import { isMac } from "../lib/platform";
 import { reportError, toast } from "../toast";
@@ -31,15 +32,6 @@ function youtubeId(url: string | null): string | null {
   const m =
     url.match(/[?&]v=([\w-]{11})/) || url.match(/youtu\.be\/([\w-]{11})/);
   return m ? m[1] : null;
-}
-
-function needsImageProxy(src: string): boolean {
-  try {
-    const host = new URL(src).hostname.toLowerCase();
-    return host === "cdnfile.sspai.com" || host === "rssfile.sspai.com";
-  } catch {
-    return false;
-  }
 }
 
 /** Plain, entity-decoded text of an HTML body — for the reading-time estimate.
@@ -214,16 +206,6 @@ export default function Reader({ onToast }: Props) {
   const [lightbox, setLightbox] = useState<{ srcs: string[]; index: number } | null>(
     null,
   );
-  const [heroBroken, setHeroBroken] = useState(false);
-  // data: URL of a hero image recovered through the backend after the webview
-  // failed to load it directly (see the body-image retry effect below). A data:
-  // URL (not blob:) so the bytes stay inline and survive the webview dropping
-  // blob backing data under memory pressure — the same fix as body images.
-  const [heroDataUrl, setHeroDataUrl] = useState<string | null>(null);
-  const [proxiedBody, setProxiedBody] = useState<{
-    source: string;
-    html: string;
-  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Host element the native original-page child webview is positioned over.
@@ -272,8 +254,6 @@ export default function Reader({ onToast }: Props) {
     setViewMode("reader");
     setScrolled(false);
     setTagPick(null);
-    setHeroBroken(false);
-    setHeroDataUrl(null);
     scrollMarkedRef.current = null;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [id]);
@@ -364,95 +344,6 @@ export default function Reader({ onToast }: Props) {
     api.setPageViewVisible(!overlayOpen).catch(() => {});
   }, [overlayOpen, viewMode, articleUrl]);
 
-  // Recover article-body images the webview fails to load, then hide the
-  // stragglers. The webview sends no Referer (see sanitize.rs) — right for
-  // blacklist-style hotlink protection (*.sinaimg.cn) but fatal on hosts that
-  // *require* one (cdnfile.sspai.com 403s a bare request), and the webview
-  // can't vary the value per host. So a failed image gets one retry through
-  // the backend, which walks Referer fallbacks (fetch_image) and returns the
-  // bytes; the <img> is swapped to an inline data: URL, with the original kept
-  // in data-papr-src for the context-menu actions. A data: URL (not blob:) is
-  // deliberate — WKWebView/WebView2 silently drop a blob:'s backing data under
-  // memory pressure (e.g. layer recompositing while scrolling), so a recovered
-  // image carried by a blob: vanishes when the user scrolls away and back; the
-  // inline data: bytes always repaint. Images the backend can't recover are
-  // hidden — a broken-image icon mid-article is just noise. Runs whenever the
-  // body changes (article switch, extract toggle, extraction finishing).
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const pageUrl = a?.url;
-    const timers: number[] = [];
-    let alive = true;
-    const recover = async (img: HTMLImageElement) => {
-      const src = img.getAttribute("src") || "";
-      if (img.dataset.paprRetried || !/^https?:\/\//.test(src)) {
-        img.style.display = "none";
-        return;
-      }
-      img.dataset.paprRetried = "1";
-      try {
-        const buf = await api.fetchImage(src, pageUrl);
-        if (!alive) return;
-        img.dataset.paprSrc = src;
-        img.src = imageDataUrl(src, buf);
-      } catch {
-        img.style.display = "none";
-      }
-    };
-    const recoverIfBroken = (img: HTMLImageElement) => {
-      if (img.dataset.paprRetried) return;
-      if (img.complete && img.naturalWidth === 0) void recover(img);
-    };
-    const onError = (e: Event) => void recover(e.currentTarget as HTMLImageElement);
-    const watched: HTMLImageElement[] = [];
-    el.querySelectorAll("img").forEach((img) => {
-      img.addEventListener("error", onError);
-      watched.push(img);
-      // Proxy-eligible images (少数派/CDN hosts that reject a bare no-referrer
-      // request) are rewritten to data: URLs up front by the `proxiedBody`
-      // effect, so don't fetch them again here — that duplicated the backend /
-      // IPC / network work for every matched image. `onError` above stays as a
-      // fallback; this only retries an image that had already failed before the
-      // listener attached.
-      recoverIfBroken(img);
-    });
-    // WKWebView can finish a parser-inserted image before React's effect
-    // listener is attached, and in practice not every broken image reports
-    // that state synchronously. A few delayed sweeps make the fallback
-    // deterministic without retrying images that are still loading.
-    [250, 1000, 2500].forEach((delay) => {
-      timers.push(window.setTimeout(() => watched.forEach(recoverIfBroken), delay));
-    });
-    return () => {
-      alive = false;
-      timers.forEach(window.clearTimeout);
-      watched.forEach((img) => img.removeEventListener("error", onError));
-    };
-  }, [a?.id, a?.url, showExtracted, a?.extractedHtml, showTranslation, a?.translatedHtml]);
-
-  // Same proactive proxy for the reader hero. These hosts need a Referer that
-  // only the Rust fetch path can provide; waiting for `onError` leaves a broken
-  // image visible in WKWebView on some builds.
-  useEffect(() => {
-    if (!a?.imageUrl || heroDataUrl || heroBroken || !needsImageProxy(a.imageUrl)) return;
-    let alive = true;
-    const articleId = a.id;
-    api
-      .fetchImage(a.imageUrl, a.url)
-      .then((buf) => {
-        if (!alive || useUi.getState().selectedArticleId !== articleId) return;
-        setHeroDataUrl(imageDataUrl(a.imageUrl!, buf));
-      })
-      .catch(() => {
-        if (!alive || useUi.getState().selectedArticleId !== articleId) return;
-        setHeroBroken(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [a?.id, a?.imageUrl, a?.url, heroDataUrl, heroBroken]);
-
   // Mark as read once when an unread article is opened (if the user opted in).
   useEffect(() => {
     if (a && !a.isRead && markReadOnOpen) actions.setRead(a.id, true);
@@ -526,55 +417,28 @@ export default function Reader({ onToast }: Props) {
     ? translatedBody ||
       (translating ? `<p><em>${t("reader.translating")}</em></p>` : baseBody)
     : baseBody;
-  const displayBody = proxiedBody?.source === body ? proxiedBody.html : body;
+  const displayBody = useMemo(() => normalizeImageHtml(body, a?.url), [body, a?.url]);
+  const emptyBody = t("reader.noContent");
+  // Stable identity prevents scroll renders from replacing recovered image/highlight nodes.
+  const bodyMarkup = useMemo(() => ({
+    __html: displayBody || `<p><em>${emptyBody}</em></p>`,
+  }), [displayBody, emptyBody]);
   // Whether the body already opens with its own image/video — if so, the hero
   // thumbnail is suppressed to avoid a redundant top image (issue #97).
   const leadsWithMedia = useMemo(() => bodyLeadsWithMedia(baseBody), [baseBody]);
 
-  // For hosts that require a Referer (notably 少数派's image CDN), proxy image
-  // URLs before injecting the HTML. This avoids relying on WKWebView's image
-  // error events for parser-inserted nodes, which are not reliable in release
-  // builds. The fetched bytes are inlined as data: URLs (not blob:) so they
-  // survive the webview dropping blob backing data while scrolling.
   useEffect(() => {
-    if (!body) {
-      setProxiedBody(null);
-      return;
-    }
-    const doc = new DOMParser().parseFromString(body, "text/html");
-    const imgs = Array.from(doc.body.querySelectorAll("img")).filter((img) => {
-      const src = img.getAttribute("src") || "";
-      return /^https?:\/\//.test(src) && needsImageProxy(src);
-    });
-    if (imgs.length === 0) {
-      setProxiedBody(null);
-      return;
-    }
-
-    let alive = true;
-    Promise.all(
-      imgs.map(async (img) => {
-        const src = img.getAttribute("src") || "";
-        try {
-          const buf = await api.fetchImage(src, a?.url);
-          if (!alive) return;
-          img.dataset.paprSrc = src;
-          img.setAttribute("src", imageDataUrl(src, buf));
-          img.removeAttribute("srcset");
-          img.removeAttribute("referrerpolicy");
-        } catch {
-          if (!alive) return;
-          img.style.display = "none";
-        }
-      }),
-    ).then(() => {
-      if (alive) setProxiedBody({ source: body, html: doc.body.innerHTML });
-    });
-
-    return () => {
-      alive = false;
-    };
-  }, [body, a?.url]);
+    const root = bodyRef.current;
+    if (!root || viewMode !== "reader") return;
+    const cleanups = Array.from(root.querySelectorAll("img"), (img) =>
+      watchImage(img, a?.url, {
+        failed: t("reader.imageLoadFailed"),
+        retry: t("common.retry"),
+        open: t("reader.openOriginalImage"),
+      }, (url) => { openUrl(url).catch(reportError); }),
+    );
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [displayBody, a?.id, a?.url, viewMode, t]);
 
   // When a translation finishes, refetch the article so its persisted
   // `translatedHtml` lands in the cache — the toggle then keeps working after
@@ -1047,7 +911,6 @@ export default function Reader({ onToast }: Props) {
             />
           ) : (
             a.imageUrl &&
-            !heroBroken &&
             // Skip the hero when the body already embeds the same image, so
             // feeds that repeat their lead image don't show it twice.
             !body.includes(a.imageUrl) &&
@@ -1055,39 +918,12 @@ export default function Reader({ onToast }: Props) {
             // article already leads with a visual, so a separate thumbnail on
             // top would just be a redundant (often mismatched) image (#97).
             !leadsWithMedia && (
-              <img
+              <ArticleImage
+                key={a.id}
                 className="reader-hero"
-                src={heroDataUrl ?? a.imageUrl}
+                src={a.imageUrl}
+                pageUrl={a.url}
                 alt=""
-                // The original URL when src is a recovered data: URL, so the
-                // context-menu copy/save actions see a real address.
-                data-papr-src={heroDataUrl ? a.imageUrl : undefined}
-                // No Referer, for the same hotlink-protection reason feed-body
-                // images are sanitized this way (e.g. *.sinaimg.cn 403s a
-                // request carrying our origin). See `sanitize`.
-                referrerPolicy="no-referrer"
-                // Same recovery as body images: hosts that *require* a Referer
-                // (cdnfile.sspai.com) 403 the direct load, so retry through
-                // the backend's Referer-fallback fetch before giving up.
-                onError={() => {
-                  // A failing data: URL means the recovered bytes weren't a
-                  // renderable image — don't loop, give up.
-                  if (heroDataUrl) {
-                    setHeroBroken(true);
-                    return;
-                  }
-                  const articleId = a.id;
-                  api
-                    .fetchImage(a.imageUrl!, a.url)
-                    .then((buf) => {
-                      if (useUi.getState().selectedArticleId !== articleId) return;
-                      setHeroDataUrl(imageDataUrl(a.imageUrl!, buf));
-                    })
-                    .catch(() => {
-                      if (useUi.getState().selectedArticleId !== articleId) return;
-                      setHeroBroken(true);
-                    });
-                }}
               />
             )
           )}
@@ -1190,9 +1026,7 @@ export default function Reader({ onToast }: Props) {
             className="article-body"
             ref={bodyRef}
             onClick={handleBodyClick}
-            dangerouslySetInnerHTML={{
-              __html: displayBody || `<p><em>${t("reader.noContent")}</em></p>`,
-            }}
+            dangerouslySetInnerHTML={bodyMarkup}
           />
         </article>
       </div>

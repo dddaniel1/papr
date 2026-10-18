@@ -34,6 +34,14 @@ describe("imageMime", () => {
     expect(imageMime("x", webp)).toBe("image/webp");
   });
 
+  it("detects extensionless SVG, AVIF, BMP and icon responses", () => {
+    const encode = (value: string) => new TextEncoder().encode(value);
+    expect(imageMime("x", encode('<?xml version="1.0"?><!-- image --><svg xmlns="http://www.w3.org/2000/svg"/>'))).toBe("image/svg+xml");
+    expect(imageMime("x", new Uint8Array([0, 0, 0, 20, ...encode("ftypavif"), 0, 0, 0, 0]))).toBe("image/avif");
+    expect(imageMime("x", encode("BM"))).toBe("image/bmp");
+    expect(imageMime("x", new Uint8Array([0, 0, 1, 0]))).toBe("image/x-icon");
+  });
+
   it("trusts magic bytes over a misleading extension", () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     expect(imageMime("https://cdn.example/photo.jpg", png)).toBe("image/png");

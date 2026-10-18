@@ -24,9 +24,7 @@ export function imageMime(src: string, bytes: Uint8Array): string {
   return "image/jpeg";
 }
 
-/** MIME type from the byte signature, or null when none of the known image
- *  formats match. SVG is text (no fixed magic bytes), so it is left to the
- *  extension fallback in `imageMime`. */
+/** MIME type from the signature, including an SVG root after an XML prelude. */
 function sniffImageMime(b: Uint8Array): string | null {
   // PNG: 89 50 4E 47
   if (b.length >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47)
@@ -44,6 +42,18 @@ function sniffImageMime(b: Uint8Array): string | null {
     b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
   )
     return "image/webp";
+  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return "image/bmp";
+  if (b.length >= 4 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0) return "image/x-icon";
+  if (b.length >= 16 && String.fromCharCode(...b.subarray(4, 8)) === "ftyp") {
+    for (let i = 8; i + 4 <= Math.min(b.length, 64); i += 4) {
+      const brand = String.fromCharCode(...b.subarray(i, i + 4));
+      if (brand === "avif" || brand === "avis") return "image/avif";
+    }
+  }
+  const text = new TextDecoder().decode(b.subarray(0, 4096))
+    .replace(/^\uFEFF/, "").trimStart()
+    .replace(/^(?:<\?xml[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*/, "");
+  if (/^<svg(?:\s|>|\/)/i.test(text)) return "image/svg+xml";
   return null;
 }
 
