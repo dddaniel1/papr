@@ -594,7 +594,8 @@
     "moveTagDown": "下へ移動",
     "tagsEmptyHint": "記事を読みながらタグを付けると、ここにまとまります。",
     "toastTagCreated": "タグを作成しました",
-    "toastTagDeleted": "タグを削除しました"
+    "toastTagDeleted": "タグを削除しました",
+    "toggleSidebar": "サイドバーを切り替え"
   },
   "error": {
     "db": "データベースエラー：{{detail}}",
@@ -636,6 +637,9 @@
     "noKindleConfig": "設定 → 連携 で Kindle アドレスと SMTP サーバーを設定してください"
   },
   "highlights": {
+    "exportMarkdown": "ハイライトとメモを Markdown でエクスポート",
+    "exportEmpty": "ハイライトを追加するとエクスポートできます",
+    "exported": "ハイライトとメモをエクスポートしました",
     "toolbarLabel": "ハイライトの色",
     "editTitle": "ハイライトを編集",
     "deleted": "ハイライトを削除しました",

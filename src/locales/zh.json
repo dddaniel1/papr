@@ -594,7 +594,8 @@
     "moveTagDown": "下移",
     "tagsEmptyHint": "在阅读时给文章打标签，即可在此分组。",
     "toastTagCreated": "已创建标签",
-    "toastTagDeleted": "已删除标签"
+    "toastTagDeleted": "已删除标签",
+    "toggleSidebar": "切换侧栏"
   },
   "error": {
     "db": "数据库出错：{{detail}}",
@@ -636,6 +637,9 @@
     "noKindleConfig": "请在 设置 → 集成 中配置 Kindle 地址和 SMTP 服务器"
   },
   "highlights": {
+    "exportMarkdown": "导出高亮与笔记为 Markdown",
+    "exportEmpty": "先添加高亮，即可导出笔记",
+    "exported": "高亮与笔记已导出",
     "toolbarLabel": "高亮颜色",
     "editTitle": "编辑高亮",
     "deleted": "已移除标注",

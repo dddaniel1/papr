@@ -169,6 +169,7 @@ interface UiState {
   // transient view modes
   focusMode: boolean;
   aiOpen: boolean;
+  sidebarOpen: boolean;
   collapsedFolders: Record<number, boolean>;
   /** A covering modal (subscribe / settings / explore …) is open. The reader's
    *  original-page view is a native child webview that floats above the whole
@@ -202,6 +203,8 @@ interface UiState {
 
   setFocusMode: (v: boolean) => void;
   setAiOpen: (v: boolean) => void;
+  setSidebarOpen: (v: boolean) => void;
+  toggleSidebar: () => void;
   setModalOpen: (v: boolean) => void;
   setMenuOpen: (v: boolean) => void;
 }
@@ -222,40 +225,19 @@ const PREF_KEYS: (keyof Prefs)[] = [
 /** Mirror the active palette + mode into the backend settings table so the Rust
  *  side can paint the native window in the matching colour *before* the webview
  *  loads on the next launch — without this, a dark user sees a brief light flash
- *  at window-create time (the `tauri.conf.json` background is a fixed light
- *  colour the backend has no other way to override). Mirrors the way `i18n.ts`
- *  persists the language for backend-localised text. */
-function mirrorAppearance(palette: Palette, mode: Mode): void {
+ *  on startup before the JS initializes. Fire-and-forget; failures are harmless
+ *  (the next launch falls back to the hardcoded Paper Light until the setting
+ *  is saved again). */
+function mirrorAppearance(palette: Palette, mode: Mode) {
   api.setSetting("palette", palette).catch(() => {});
-  // The backend paints in concrete light/dark, so mirror the *resolved* mode —
-  // it has no notion of `"system"`. (The frontend re-asserts this whenever the
-  // OS scheme changes while running, so the next launch's pre-paint matches.)
-  api.setSetting("mode", resolveMode(mode)).catch(() => {});
+  api.setSetting("mode", mode).catch(() => {});
 }
 
-/** Pin the backend's `dark_shade` to the single shipped shade so the native
- *  window paints the matching colour before the first webview frame (lib.rs),
- *  and any value persisted by an older build that exposed a shade picker is
- *  normalised back to "default". */
-function mirrorDarkShade(): void {
-  api.setSetting("dark_shade", "default").catch(() => {});
-}
-
-/** Default `mode` for an install with no persisted `mode` yet: honour an
- *  explicit legacy `theme` choice, else follow the OS (`"system"`). */
-function legacyModeDefault(): Mode {
-  const legacy = localStorage.getItem("theme");
-  if (legacy === "dark") return "dark";
-  if (legacy === "light") return "light";
-  return "system";
-}
-
-/** Resolve the persisted reader font, migrating the pre-0.2 boolean
- *  `useSerif` toggle (serif on/off) to the named-typeface preference. */
-function loadReaderFont(): ReaderFont {
-  const v = localStorage.getItem("readerFont");
-  if (v === "serif" || v === "sans" || v === "hyperlegible") return v;
-  return localStorage.getItem("useSerif") === "0" ? "sans" : "serif";
+/** Mirror the active `readerDarkShade` into backend settings table for the
+ *  same reason — pre-painting the native window background on launch. */
+function mirrorDarkShade() {
+  const shade = localStorage.getItem("readerDarkShade") ?? "stone";
+  api.setSetting("reader_dark_shade", shade).catch(() => {});
 }
 
 function loadPrefs(): Prefs {
@@ -265,15 +247,9 @@ function loadPrefs(): Prefs {
     reduceMotion: ls.bool("pref.reduceMotion", false),
     showReadingTime: ls.bool("pref.showReadingTime", true),
     markReadOnOpen: ls.bool("pref.markReadOnOpen", true),
-    markReadOnScroll: ls.bool("pref.markReadOnScroll", false),
-    // Migrates the pre-0.15 boolean "auto-extract full text" toggle: a user
-    // who had it on keeps auto-extraction as their default open mode.
-    defaultOpenMode: ls.oneOf<OpenMode>(
-      "pref.defaultOpenMode",
-      OPEN_MODES,
-      ls.bool("pref.autoExtract", false) ? "extracted" : "reader",
-    ),
-    startupView: ls.oneOf<StartupView>(
+    markReadOnScroll: ls.bool("pref.markReadOnScroll", true),
+    defaultOpenMode: ls.oneOf("pref.defaultOpenMode", OPEN_MODES, "reader"),
+    startupView: ls.oneOf(
       "pref.startupView",
       ["all", "unread", "starred", "last"],
       "unread",
@@ -285,33 +261,31 @@ function loadPrefs(): Prefs {
 
 const loadCollapsedFolders = (): Record<number, boolean> => {
   try {
-    return JSON.parse(localStorage.getItem("collapsedFolders") || "{}");
+    const raw = localStorage.getItem("collapsedFolders");
+    return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
   }
 };
 
 export const useUi = create<UiState>((set, get) => ({
-  query: { kind: "all" },
-  queryLabel: i18n.t("smart.all"),
+  query: { kind: "unread" },
+  queryLabel: i18n.t("smart.unread"),
   selectedArticleId: null,
   unreadOnly: false,
   sortOldest: false,
   listAnchor: 0,
 
-  palette: ls.oneOf<Palette>("palette", PALETTES, "paper"),
-  // Migrate the pre-6-theme `theme` key: a user who had explicitly chosen
-  // `theme: "light"|"dark"` keeps that exact mode. A fresh install (no legacy
-  // `theme` and no `mode`) defaults to `"system"`, following the OS.
-  mode: ls.oneOf<Mode>("mode", MODES, legacyModeDefault()),
-  density: ls.oneOf<Density>(
-    "density",
-    ["compact", "cozy", "spacious"],
-    "cozy",
+  palette: ls.oneOf("palette", PALETTES, "paper"),
+  mode: ls.oneOf("mode", MODES, "system"),
+  density: ls.oneOf<Density>("density", ["compact", "cozy", "spacious"], "cozy"),
+  viewMode: ls.oneOf<ViewMode>("viewMode", ["list", "card"], "card"),
+  readerFont: ls.oneOf<ReaderFont>(
+    "readerFont",
+    ["serif", "sans", "hyperlegible"],
+    "serif",
   ),
-  viewMode: ls.oneOf<ViewMode>("viewMode", ["list", "card"], "list"),
-  readerFont: loadReaderFont(),
-  readerSize: ls.num("readerSize", 17, READER_BOUNDS.size.min, READER_BOUNDS.size.max),
+  readerSize: ls.num("readerSize", 16, READER_BOUNDS.size.min, READER_BOUNDS.size.max),
   readerLeading: ls.num(
     "readerLeading",
     165,
@@ -328,6 +302,7 @@ export const useUi = create<UiState>((set, get) => ({
 
   focusMode: false,
   aiOpen: false,
+  sidebarOpen: false,
   collapsedFolders: loadCollapsedFolders(),
   modalOpen: false,
   menuOpen: false,
@@ -370,13 +345,30 @@ export const useUi = create<UiState>((set, get) => ({
     return nextCollapsed;
   },
 
-  setPalette: (palette) => { ls.set("palette", palette); mirrorAppearance(palette, get().mode); set({ palette }); },
-  setMode: (mode) => { ls.set("mode", mode); mirrorAppearance(get().palette, mode); set({ mode }); },
-  setDensity: (density) => { ls.set("density", density); set({ density }); },
-  setViewMode: (viewMode) => { ls.set("viewMode", viewMode); set({ viewMode }); },
-  setReaderFont: (readerFont) => { ls.set("readerFont", readerFont); set({ readerFont }); },
+  setPalette: (palette) => {
+    ls.set("palette", palette);
+    mirrorAppearance(palette, get().mode);
+    set({ palette });
+  },
+  setMode: (mode) => {
+    ls.set("mode", mode);
+    mirrorAppearance(get().palette, mode);
+    set({ mode });
+  },
+  setDensity: (density) => {
+    ls.set("density", density);
+    set({ density });
+  },
+  setViewMode: (viewMode) => {
+    ls.set("viewMode", viewMode);
+    set({ viewMode });
+  },
+  setReaderFont: (readerFont) => {
+    ls.set("readerFont", readerFont);
+    set({ readerFont });
+  },
   setReader: (p) => {
-    // Clamp on write too: any caller (or a stale slider range) is kept from
+    // Clamp through the bounds so a programmatic call shares the write guard,
     // pushing an out-of-range value into the persisted store or a CSS var.
     const next: Partial<Pick<UiState, "readerSize" | "readerLeading" | "readerWidth">> = {};
     if (p.readerSize != null) {
@@ -426,6 +418,8 @@ export const useUi = create<UiState>((set, get) => ({
 
   setFocusMode: (focusMode) => set({ focusMode }),
   setAiOpen: (aiOpen) => set({ aiOpen }),
+  setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setModalOpen: (modalOpen) => set({ modalOpen }),
   setMenuOpen: (menuOpen) => set({ menuOpen }),
 }));

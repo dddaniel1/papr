@@ -114,7 +114,7 @@ export default function App() {
   const [explore, setExplore] = useState(false);
   const [aiMode, setAiMode] = useState<AiMode | null>(null);
   const [newFolder, setNewFolder] = useState(false);
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const sidebarOpen = useUi((s) => s.sidebarOpen);
 
   // Mirror "any covering modal is open" into the store. The reader's
   // original-page view is a native child webview that floats above the whole
@@ -122,8 +122,8 @@ export default function App() {
   // reader watches this flag and tears the view down while a modal is up.
   const setModalOpen = useUi((s) => s.setModalOpen);
   useEffect(() => {
-    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder || sidebarExpanded || aiMode != null);
-  }, [cpOpen, settings.open, addFeed, explore, newFolder, sidebarExpanded, aiMode, setModalOpen]);
+    setModalOpen(cpOpen || settings.open || addFeed || explore || newFolder || sidebarOpen || aiMode != null);
+  }, [cpOpen, settings.open, addFeed, explore, newFolder, sidebarOpen, aiMode, setModalOpen]);
 
   // ── apply appearance to the document root ──
   useEffect(() => {
@@ -399,6 +399,9 @@ export default function App() {
         toggleFolders();
         break;
       case "refresh": doRefresh(); break;
+      case "toggle-sidebar":
+        useUi.getState().toggleSidebar();
+        break;
       case "add-feed": setAddFeed(true); break;
       case "new-folder": setNewFolder(true); break;
       case "opml": openSettings("subscriptions"); break;
@@ -465,6 +468,11 @@ export default function App() {
       if (mod && e.key.toLowerCase() === "r") {
         e.preventDefault();
         doRefresh();
+        return;
+      }
+      if (mod && (e.key === "1" || e.key.toLowerCase() === "b")) {
+        e.preventDefault();
+        useUi.getState().toggleSidebar();
         return;
       }
       if (mod) return;
@@ -550,6 +558,7 @@ export default function App() {
           }
           break;
         case "escape":
+          st.setSidebarOpen(false);
           st.setFocusMode(false);
           st.setAiOpen(false);
           break;
@@ -575,7 +584,7 @@ export default function App() {
             onAi={() => setAiMode("ask")}
             onRefresh={doRefresh}
             refreshing={refreshing}
-            onExpandedChange={setSidebarExpanded}
+            onExpandedChange={(open) => useUi.getState().setSidebarOpen(open)}
             onToast={showToast}
           />
           <ArticleList onToast={showToast} onAddFeed={() => setAddFeed(true)} />

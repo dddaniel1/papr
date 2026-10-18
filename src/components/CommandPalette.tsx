@@ -23,7 +23,8 @@ export type CommandAction =
   | "add-feed"
   | "new-folder"
   | "opml"
-  | "open-settings";
+  | "open-settings"
+  | "toggle-sidebar";
 
 interface Props {
   open: boolean;
@@ -56,6 +57,7 @@ const ACTIONS: { icon: IconName; labelKey: string; hint: string; action: Command
   { icon: "folder", labelKey: "commandPalette.actionNewFolder", hint: "", action: "new-folder" },
   { icon: "open", labelKey: "commandPalette.actionOpml", hint: "", action: "opml" },
   { icon: "settings", labelKey: "commandPalette.actionOpenSettings", hint: modCombo(","), action: "open-settings" },
+  { icon: "sidebar", labelKey: "sidebar.toggleSidebar", hint: modCombo("1"), action: "toggle-sidebar" },
 ];
 
 export default function CommandPalette({

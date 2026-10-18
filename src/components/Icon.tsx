@@ -12,7 +12,8 @@ export type IconName =
   | "chevron-right" | "globe" | "focus" | "arrow-down" | "arrow-up"
   | "eye" | "eye-off" | "trash" | "mute" | "pin" | "x" | "command"
   | "copy" | "list" | "grid" | "text" | "alert" | "papr"
-  | "play" | "pause" | "skip-back" | "skip-fwd" | "headphones";
+  | "play" | "pause" | "skip-back" | "skip-fwd" | "headphones"
+  | "sidebar";
 
 interface Props {
   name: IconName;
@@ -147,6 +148,8 @@ export default function Icon({
       return <svg {...p}><path d="M4 14v-2a8 8 0 0 1 16 0v2" /><rect x="2.5" y="13" width="4.5" height="7" rx="2.2" /><rect x="17" y="13" width="4.5" height="7" rx="2.2" /></svg>;
     case "papr":
       return <svg {...p}><path d="M6 3h7l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" /><path d="M13 3v4a1 1 0 0 0 1 1h4" /><path d="M8 13.5a3.5 3.5 0 0 1 3.5 3.5M8 11a6 6 0 0 1 6 6" /><circle cx="8" cy="17" r="1.1" fill={color} stroke="none" /></svg>;
+    case "sidebar":
+      return <svg {...p}><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="M9 4v16" /></svg>;
     default:
       return null;
   }

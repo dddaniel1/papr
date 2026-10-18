@@ -594,7 +594,8 @@
     "moveTagDown": "Move down",
     "tagsEmptyHint": "Tag articles while reading to group them here.",
     "toastTagCreated": "Tag created",
-    "toastTagDeleted": "Tag deleted"
+    "toastTagDeleted": "Tag deleted",
+    "toggleSidebar": "Toggle sidebar"
   },
   "error": {
     "db": "Database error: {{detail}}",
@@ -636,6 +637,9 @@
     "noKindleConfig": "Configure your Kindle address and SMTP server in Settings → Integrations"
   },
   "highlights": {
+    "exportMarkdown": "Export highlights and notes as Markdown",
+    "exportEmpty": "Add a highlight to export notes",
+    "exported": "Highlights and notes exported",
     "toolbarLabel": "Highlight color",
     "editTitle": "Edit highlight",
     "deleted": "Highlight removed",

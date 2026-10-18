@@ -100,24 +100,25 @@ export default function Sidebar({
   const actions = useArticleActions();
   const query = useUi((s) => s.query);
   const selectView = useUi((s) => s.select);
-  const [expanded, setExpanded] = useState(false);
-  useEffect(() => onExpandedChange(expanded), [expanded, onExpandedChange]);
+  const sidebarOpen = useUi((s) => s.sidebarOpen);
+  const setSidebarOpen = useUi((s) => s.setSidebarOpen);
+  useEffect(() => onExpandedChange(sidebarOpen), [sidebarOpen, onExpandedChange]);
   const select = (query: ArticleQuery, label: string) => {
     selectView(query, label);
-    setExpanded(false);
+    setSidebarOpen(false);
   };
 
   useEffect(() => {
-    if (!expanded) return;
+    if (!sidebarOpen) return;
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopImmediatePropagation();
-        setExpanded(false);
+        setSidebarOpen(false);
       }
     };
-    const onResize = () => setExpanded(false);
+    const onResize = () => setSidebarOpen(false);
     const onOutside = (event: PointerEvent) => {
-      if (!(event.target as Element)?.closest(".sidebar")) setExpanded(false);
+      if (!(event.target as Element)?.closest(".sidebar, .list-sidebar-toggle")) setSidebarOpen(false);
     };
     document.addEventListener("pointerdown", onOutside);
     window.addEventListener("keydown", close, true);
@@ -127,7 +128,7 @@ export default function Sidebar({
       window.removeEventListener("keydown", close, true);
       window.removeEventListener("resize", onResize);
     };
-  }, [expanded]);
+  }, [sidebarOpen, setSidebarOpen]);
   const showCounts = useUi((s) => s.prefs.showSidebarCounts);
   const unreadOnly = useUi((s) => s.prefs.sidebarUnreadOnly);
   const setPref = useUi((s) => s.setPref);
@@ -580,24 +581,47 @@ export default function Sidebar({
   );
 
   return (
-    <div className={`sidebar ${expanded ? "expanded" : ""}`} role="navigation">
-      <button
-        className="sb-expand"
-        aria-label={t(expanded ? "sidebar.collapseSidebar" : "sidebar.expandSidebar")}
-        title={t(expanded ? "sidebar.collapseSidebar" : "sidebar.expandSidebar")}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <Icon name={expanded ? "x" : "chevron-right"} size={15} />
-      </button>
-      {isMac && <div className="titlebar" data-tauri-drag-region />}
+    <>
+      <div
+        className={`sidebar-backdrop ${sidebarOpen ? "open" : ""}`}
+        aria-hidden="true"
+        onClick={() => setSidebarOpen(false)}
+      />
+      <div className={`sidebar ${sidebarOpen ? "expanded" : ""}`} role="navigation">
+        {isMac && <div className="titlebar" data-tauri-drag-region />}
 
-      {isMac && (
-        <div className="sb-brand">
-          <img className="sb-brand-mark" src="/papr.svg" alt="" />
-          <span className="sb-brand-name">Papr</span>
-        </div>
-      )}
+        {isMac && (
+          <div className="sb-brand">
+            <img className="sb-brand-mark" src="/papr.svg" alt="" />
+            <span className="sb-brand-name">Papr</span>
+            <button
+              type="button"
+              className="sb-drawer-close"
+              aria-label={t("sidebar.collapseSidebar")}
+              title={t("sidebar.collapseSidebar")}
+              onClick={() => setSidebarOpen(false)}
+            >
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+        )}
+        {!isMac && (
+          <div className="sb-drawer-header">
+            <div className="sb-brand">
+              <img className="sb-brand-mark" src="/papr.svg" alt="" />
+              <span className="sb-brand-name">Papr</span>
+            </div>
+            <button
+              type="button"
+              className="sb-drawer-close"
+              aria-label={t("sidebar.collapseSidebar")}
+              title={t("sidebar.collapseSidebar")}
+              onClick={() => setSidebarOpen(false)}
+            >
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+        )}
 
       <div
         className="sidebar-search"
@@ -954,5 +978,6 @@ export default function Sidebar({
         />
       )}
     </div>
+    </>
   );
 }

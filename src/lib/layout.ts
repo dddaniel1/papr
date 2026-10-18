@@ -1,6 +1,6 @@
 // Window-size → layout decisions.
 //
-// Papr is a fixed three-pane desktop reader: a sidebar and an article list of
+// Papr is a three-pane desktop reader: a sidebar and an article list of
 // pixel widths the user drags, and a reader that takes whatever is left. That
 // composition is right for a wide window and wrong for a narrow one, and
 // nothing ever re-checked the widths against the window — the stored values
@@ -21,8 +21,8 @@
 /** Minimum reader width while all three panes are visible. */
 export const READER_FLOOR = 480;
 
-/** Below this viewport width the sidebar folds to an icon rail. Sits where the
- *  stock three panes stop holding a readable measure (sidebar + list + the
+/** Below this viewport width the sidebar folds into a drawer overlay. Sits where
+ *  the stock three panes stop holding a readable measure (sidebar + list + the
  *  reader floor). */
 export const COMPACT_MAX_WIDTH = 1120;
 
@@ -33,11 +33,13 @@ export const WIDE_MIN_WIDTH = 1440;
 /** Below this viewport height the chrome's vertical rhythm tightens. */
 export const SHORT_MAX_HEIGHT = 680;
 
-/** Icon-rail width, in px. Mirrors `--rail-w` in styles.css, and wide enough
- *  to hold the macOS traffic lights when the sidebar collapses under them. */
-export const RAIL_WIDTH = 72;
+/** In-grid sidebar width when folded in compact/narrow mode. In drawer mode
+ *  this is 0 so the content panes yield the entire window to reading, while
+ *  the sidebar slides out as a floating drawer on demand. */
+export const RAIL_WIDTH = 0;
 
-/** Below this width the list and reader take turns in the main pane. */
+/** Below this width the list and reader take turns in the main pane.
+ *  With the sidebar hidden (0px), 2 panes need at least listMin (300) + readerFloor (480) = 780px. */
 export const NARROW_MAX_WIDTH = RAIL_WIDTH + 300 + READER_FLOOR;
 
 export type WidthMode = "narrow" | "compact" | "standard" | "wide";
@@ -81,9 +83,10 @@ export interface Columns {
 /**
  * The widths the two fixed panes should actually render at.
  *
- * In a compact window the sidebar is an icon rail, so its width is not the
- * user's to set there — it renders at `railWidth` regardless of the stored
- * value, and the stored value is what comes back when the window grows.
+ * In a compact window the sidebar folds into a drawer (grid width 0), so its
+ * width is not the user's to set there — it renders at `railWidth` (0) regardless
+ * of the stored value, and the stored value is what comes back when the window
+ * grows.
  */
 export function effectiveColumns({
   width,

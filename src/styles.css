@@ -714,6 +714,35 @@ button { font-family: inherit; }
    so the header title sits below it. Other platforms have the native title
    bar above the webview and don't need the extra inset. */
 :root[data-platform="mac"] .list-header { padding-top: 38px; }
+
+.list-header-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.list-sidebar-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all .15s ease;
+}
+.list-sidebar-toggle:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .list-sidebar-toggle {
+  display: inline-flex;
+}
+
 .list-title {
   font-size: 18px;
   font-weight: 600;
@@ -3013,87 +3042,85 @@ button { font-family: inherit; }
    carry a `title`, so the pointer still gets a tooltip, and the row's context
    menu is unchanged. */
 
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-brand {
-  justify-content: center;
-  margin: 19px 0 10px;
+/* ====== Sidebar Drawer in Compact & Narrow Mode ======
+   Instead of collapsing into an inelegant icon rail that hides labels, badges,
+   and folder hierarchy, the sidebar yields its in-grid space completely (col: 0)
+   and acts as a full-featured drawer that slides out from the left on demand. */
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.26);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  z-index: 28;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .22s ease, visibility .22s;
 }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search {
-  width: 36px;
-  height: 36px;
-  margin: 8px auto 12px;
-  padding: 0;
-  justify-content: center;
-  border-radius: 9px;
-  cursor: pointer;
-}
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-scroll { padding: 4px 4px 12px; }
-
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-brand-name,
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search > span,
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-search > kbd,
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-label,
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-name,
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title > span:first-child {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar-backdrop.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-item {
-  justify-content: center;
-  height: 32px;
-  padding: 0 6px;
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(280px, 86vw);
+  z-index: 30;
+  background: var(--panel);
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.16), 1px 0 0 var(--hair);
+  transform: translateX(-100%);
+  visibility: hidden;
+  pointer-events: none;
+  transition: transform .25s cubic-bezier(0.16, 1, 0.3, 1), visibility .25s;
 }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) :is(.sb-count, .sb-warn) {
+
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar.expanded {
+  transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+}
+
+:root[data-reduce-motion="true"]:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar {
+  transition: none;
+}
+
+.sb-drawer-close {
   display: none;
-}
-
-/* Section titles lose their labels, so each one becomes a hairline rule and
-   its actions drop into a small centred cluster beneath it. */
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title {
-  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 12px 0 6px;
-}
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title::before {
-  content: "";
-  width: 20px;
-  height: 1px;
-  background: var(--hair-strong);
-}
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-actions {
-  flex-direction: column;
-  gap: 2px;
-}
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-section-title button {
-  width: 24px;
-  height: 24px;
   justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
 }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-all-toggle { display: none; }
-
-/* A collapse chevron means nothing at rail width; a folder glyph stands in, and
-   the row still selects the folder's combined view. */
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-toggle { display: none; }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder {
-  justify-content: center;
-  padding: 8px 6px 4px;
+.sb-drawer-close:hover {
+  background: var(--hover);
+  color: var(--ink);
 }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-folder-mark { display: inline-flex; }
-
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sb-footer {
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 0;
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sb-drawer-close {
+  display: inline-flex;
 }
 
-/* The sidebar is a rail here — there is no boundary to drag. */
+.sb-drawer-header {
+  display: none;
+  align-items: center;
+  margin: 14px 12px 6px;
+}
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sb-drawer-header {
+  display: flex;
+}
+
+/* The sidebar is not an in-grid column here — there is no boundary to drag. */
 :root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .resize-handle-slot--sidebar { display: none; }
 
 /* ---- Short window: tighten the vertical rhythm ----
@@ -3199,36 +3226,8 @@ button { font-family: inherit; }
 .ai-prose pre { max-width: 100%; overflow-x: auto; }
 .ai-drawer { max-width: 100%; }
 
-/* The rail can open over the list to reveal names and folder controls. */
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sb-expand {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 30px;
-  margin: 0 auto 2px;
-  flex-shrink: 0;
-  border: 0;
-  border-radius: 6px;
-  color: var(--muted);
-  background: transparent;
-  cursor: pointer;
-  order: -1;
-}
-.sb-expand:hover { background: var(--hover); color: var(--ink); }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar.expanded {
-  position: absolute;
-  grid-column: 1 / -1;
-  inset: 0 auto 0 0;
-  width: min(280px, 100%);
-  z-index: 12;
-  box-shadow: var(--shadow-modal);
-}
-.sidebar.expanded .sb-expand { margin-right: 12px; }
-:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sidebar:not(.expanded) .sidebar-scroll > div[style] {
-  overflow-wrap: anywhere;
-  padding-inline: 4px !important;
-}
+/* In compact/narrow drawer mode, the sidebar uses normal full-width scroll layout. */
+:root:is([data-width-mode="compact"], [data-width-mode="narrow"]) .sb-expand { display: none; }
 
 /* Below the three-pane minimum, reading becomes a list/detail flow.
    Keep the virtual list measured underneath so returning retains its position. */

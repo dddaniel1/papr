@@ -455,7 +455,17 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
   return (
     <div className="list" role="region" aria-labelledby="article-list-title">
       <div className="list-header" {...(isMac && { "data-tauri-drag-region": true })}>
-        <h1 className="list-title" id="article-list-title">
+        <div className="list-header-row">
+          <button
+            type="button"
+            className="list-sidebar-toggle"
+            aria-label={t("sidebar.toggleSidebar")}
+            title={`${t("sidebar.toggleSidebar")} (${modCombo("1")})`}
+            onClick={() => useUi.getState().toggleSidebar()}
+          >
+            <Icon name="sidebar" size={16} />
+          </button>
+          <h1 className="list-title" id="article-list-title">
           {/* Smart views re-translate live; feed/folder/tag keep their own title. */}
           <span className="list-title-label" title={queryLabel}>
             {query.kind === "feed" ||
@@ -500,6 +510,7 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
             </span>
           </span>
         </h1>
+        </div>
         <div className="list-meta">
           <button
             className={`list-meta-btn ${!sortOldest ? "on" : ""}`}
