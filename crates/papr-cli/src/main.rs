@@ -205,15 +205,21 @@ enum Cmd {
 enum SyncCmd {
     /// Show the current sync connection (default).
     Status,
-    /// Connect to a FreshRSS / Miniflux server (verifies credentials).
+    /// Connect a feed-sync provider (verifies credentials).
     Connect {
+        /// Server URL. Required for FreshRSS and Miniflux.
         #[arg(long)]
-        url: String,
+        url: Option<String>,
+        /// Username. Required for FreshRSS and Miniflux.
         #[arg(long)]
-        user: String,
+        user: Option<String>,
+        /// Password or application password for FreshRSS / Miniflux.
         #[arg(long)]
-        password: String,
-        #[arg(long, value_parser = ["freshrss", "miniflux"])]
+        password: Option<String>,
+        /// Personal API token for Feedly, or an access token for Inoreader.
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, value_parser = ["freshrss", "miniflux", "inoreader", "feedly"])]
         provider: Option<String>,
     },
     /// Forget the stored sync credentials.
@@ -588,7 +594,8 @@ fn ensure_single_filter(selectors: &[(&str, bool)]) -> Result<(), AxiError> {
 /// terminal scrollback.
 fn is_secret_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
-    ["api_key", "password", "secret", "token"].iter().any(|needle| k.contains(needle))
+    matches!(k.as_str(), "freshrss_auth" | "freshrss_pass")
+        || ["api_key", "password", "secret", "token"].iter().any(|needle| k.contains(needle))
 }
 
 /// A masked preview of a secret: enough to confirm *which* value is set
@@ -1073,12 +1080,41 @@ async fn cmd_sync(path: &Path, cmd: SyncCmd) -> Result<String, AxiError> {
             }
             Ok(d.into_toon())
         }
-        SyncCmd::Connect { url, user, password, provider } => {
-            sync::connect(&dbm, &client, &url, &user, &password, provider.as_deref())
-                .await
-                .map_err(|e| clean_err("sync connect failed", e))?;
+        SyncCmd::Connect { url, user, password, token, provider } => {
+            let provider = provider.as_deref().unwrap_or("freshrss");
+            let result = match provider {
+                "feedly" => {
+                    let token = token.as_deref().or(password.as_deref()).unwrap_or_default();
+                    sync::connect_feedly(&dbm, &client, token).await
+                }
+                "inoreader" => {
+                    let token = token.as_deref().or(password.as_deref()).unwrap_or_default();
+                    sync::connect_inoreader_token(&dbm, &client, token).await
+                }
+                _ => {
+                    let (Some(url), Some(user), Some(password)) =
+                        (url.as_deref(), user.as_deref(), password.as_deref())
+                    else {
+                        return Err(AxiError::usage(
+                            "FreshRSS and Miniflux need --url, --user and --password",
+                            vec![
+                                "Run `papr sync connect --provider freshrss --url <url> --user <user> --password <password>`".into(),
+                                "For Feedly use `--provider feedly --token <token>`".into(),
+                                "For Inoreader use `--provider inoreader --token <access-token>`".into(),
+                            ],
+                        ));
+                    };
+                    sync::connect(&dbm, &client, url, user, password, Some(provider)).await
+                }
+            };
+            result.map_err(|e| clean_err("sync connect failed", e))?;
+            let destination = match provider {
+                "feedly" => "Feedly".to_string(),
+                "inoreader" => "Inoreader".to_string(),
+                _ => url.unwrap_or_else(|| provider.to_string()),
+            };
             let mut d = Doc::new();
-            d.set("ok", format!("connected to {url}"));
+            d.set("ok", format!("connected to {destination}"));
             d.help(vec!["Run `papr sync run` to reconcile now".into()]);
             Ok(d.into_toon())
         }
@@ -1990,6 +2026,15 @@ fn render_error(e: &AxiError) -> String {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn sync_credentials_are_masked_in_settings_output() {
+        for key in ["freshrss_auth", "freshrss_pass", "sync_refresh_token", "inoreader_client_secret"] {
+            assert!(is_secret_key(key), "{key}");
+        }
+        assert!(!is_secret_key("freshrss_provider"));
+        assert!(!is_secret_key("inoreader_client_id"));
+    }
 
     /// CI guard against the installable skill drifting from the actual CLI
     /// surface: every command must be documented as a `papr <name>` example, and

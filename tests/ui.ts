@@ -67,7 +67,11 @@ mockIPC(async (cmd, args: any = {}) => {
       args.onToken.onmessage({ type: "delta", data: cmd === "ai_ask" ? "Answer from your feeds" : "Your recent briefing" });
       args.onToken.onmessage({ type: "done" }); return;
     case "storage_stats": return { dbBytes: 1024, articleCount: state.articles.length, feedCount: state.feeds.length };
-    case "freshrss_status": return { connected: false };
+    case "freshrss_status": return { connected: false, provider: "freshrss", url: null };
+    case "get_archive_settings": return {
+      obsidian: { vaultPath: "", folder: "", configured: false },
+      notion: { configured: false, targetType: "page", targetId: "", tokenConfigured: false },
+    };
     case "plugin:app|version": return "test";
     case "plugin:autostart|is_enabled": return false;
     default: return null;
@@ -117,6 +121,20 @@ async function runChecks() {
   await waitFor(() => !!document.querySelector(".settings-window"), "settings");
   if (document.querySelectorAll("button.settings-nav-item").length !== 10) throw new Error("Settings navigation is not keyboard focusable");
   if (!document.querySelector(".settings-window")!.contains(document.activeElement)) throw new Error("Settings did not take focus");
+  await nav("Third-party services");
+  await waitFor(() => document.querySelectorAll(".service-connection").length === 6, "sync and archive services");
+  const services = [...document.querySelectorAll(".service-name")].map((element) => element.textContent);
+  for (const name of ["FreshRSS", "Miniflux", "Inoreader", "Feedly", "Obsidian", "Notion"]) {
+    if (!services.includes(name)) throw new Error(`Missing service: ${name}`);
+  }
+  for (const name of ["Obsidian", "Notion"]) {
+    const service = [...document.querySelectorAll<HTMLDetailsElement>(".service-connection")]
+      .find((element) => element.querySelector(".service-name")?.textContent === name)!;
+    service.querySelector("summary")!.click();
+    await waitFor(() => service.open && !!service.querySelector("form input"), `${name} configuration`);
+    service.querySelector("summary")!.click();
+  }
+  checks.push("All six services appear and both archive configuration forms open");
   await nav("Notifications");
   await waitFor(() => document.querySelector<HTMLInputElement>(".s-toggle")?.disabled === false, "notification settings");
   state.failSetting = "notify_enabled";

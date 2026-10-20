@@ -33,6 +33,34 @@ export const renameFolder = (id: number, name: string) =>
 export const deleteFolder = (id: number) =>
   invoke<void>("delete_folder", { id });
 
+// ── article archives ──
+export type ArchiveService = "obsidian" | "notion";
+export interface ArchiveSettings {
+  obsidian: { vaultPath: string; folder: string; configured: boolean };
+  notion: {
+    configured: boolean;
+    targetType: "page" | "database";
+    targetId: string;
+    tokenConfigured: boolean;
+  };
+}
+export const getArchiveSettings = () =>
+  invoke<ArchiveSettings>("get_archive_settings");
+export const chooseObsidianVault = () =>
+  invoke<string | null>("choose_obsidian_vault");
+export const configureObsidian = (vaultPath: string, folder: string) =>
+  invoke<ArchiveSettings>("configure_obsidian", { vaultPath, folder });
+/** An empty token preserves the existing integration token. */
+export const configureNotion = (
+  token: string,
+  targetType: "page" | "database",
+  targetId: string,
+) => invoke<ArchiveSettings>("configure_notion", { token, targetType, targetId });
+export const disconnectArchiveService = (service: ArchiveService) =>
+  invoke<ArchiveSettings>("disconnect_archive_service", { service });
+export const archiveArticle = (articleId: number, service: ArchiveService) =>
+  invoke<{ location: string }>("archive_article", { articleId, service });
+
 // ── images ──
 /** Fetch an image's raw bytes via the backend, which walks Referer fallbacks
  *  (none → image origin → article URL) until the host serves it — hotlink
@@ -252,12 +280,14 @@ export const clearArticles = () => invoke<number>("clear_articles");
 export const applyNetworkSettings = () =>
   invoke<void>("apply_network_settings");
 
-// ── GReader sync (FreshRSS / Miniflux) ──
+// ── feed sync (FreshRSS / Miniflux / Inoreader / Feedly) ──
+export type FeedSyncProvider = "freshrss" | "miniflux" | "inoreader" | "feedly";
+/** Kept as an alias for callers that only deal with the two GReader servers. */
 export type GReaderProvider = "freshrss" | "miniflux";
 export interface FreshRssStatus {
   connected: boolean;
   url: string | null;
-  provider: GReaderProvider;
+  provider: FeedSyncProvider;
 }
 export const freshrssStatus = () => invoke<FreshRssStatus>("freshrss_status");
 export const freshrssConnect = (
@@ -266,6 +296,12 @@ export const freshrssConnect = (
   password: string,
   provider: GReaderProvider = "freshrss",
 ) => invoke<void>("freshrss_connect", { url, username, password, provider });
+export const feedlyConnect = (token: string) =>
+  invoke<void>("feedly_connect", { token });
+export const inoreaderConnectToken = (token: string) =>
+  invoke<void>("inoreader_connect_token", { token });
+export const inoreaderConnectOauth = (clientId: string, clientSecret: string) =>
+  invoke<void>("inoreader_connect_oauth", { clientId, clientSecret });
 export const freshrssDisconnect = () => invoke<void>("freshrss_disconnect");
 export const freshrssSync = () => invoke<number>("freshrss_sync");
 

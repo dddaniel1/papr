@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
 // ─────────────────────────── native chrome ───────────────────────────
@@ -1509,16 +1510,16 @@ pub async fn apply_network_settings(state: State<'_, AppState>) -> AppResult<()>
     Ok(())
 }
 
-// ─────────────────────────── FreshRSS sync ───────────────────────────
+// ─────────────────────────── feed sync ───────────────────────────
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FreshRssStatus {
     connected: bool,
     url: Option<String>,
-    /// Which GReader-compatible backend is connected: "freshrss" or
-    /// "miniflux". Always present (defaults to "freshrss") so the UI never
-    /// has to guess for older installs.
+    /// Which feed-sync backend is connected: "freshrss", "miniflux",
+    /// "inoreader", or "feedly". Always present (defaults to "freshrss") so
+    /// the UI never has to guess for older installs.
     provider: String,
 }
 
@@ -1533,6 +1534,120 @@ pub async fn freshrss_connect(
     let state = app.state::<AppState>();
     crate::sync::connect(&state.db, &state.http(), &url, &username, &password, provider.as_deref())
         .await
+}
+
+#[tauri::command]
+pub async fn feedly_connect(app: AppHandle, token: String) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    crate::sync::connect_feedly(&state.db, &state.http(), &token).await
+}
+
+#[tauri::command]
+pub async fn inoreader_connect_token(app: AppHandle, token: String) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    crate::sync::connect_inoreader_token(&state.db, &state.http(), &token).await
+}
+
+/// Start Inoreader's authorization-code flow. The loopback listener owns the
+/// fixed redirect URI registered in the user's Inoreader OAuth app. It waits
+/// for exactly one callback and then shuts down.
+#[tauri::command]
+pub async fn inoreader_connect_oauth(
+    app: AppHandle,
+    client_id: String,
+    client_secret: String,
+) -> AppResult<()> {
+    let client_id = client_id.trim().to_string();
+    let client_secret = client_secret.trim().to_string();
+    if client_id.is_empty() || client_secret.is_empty() {
+        return Err(AppError::code("inoreaderTokenRequired"));
+    }
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 19812))
+        .await
+        .map_err(|_| AppError::code("inoreaderOauthPortBusy"))?;
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let auth_url = crate::sync::inoreader_auth_url(&client_id, &state);
+    app.opener()
+        .open_url(auth_url, None::<&str>)
+        .map_err(|_| AppError::code("inoreaderOauthFailed"))?;
+
+    let code = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        loop {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .map_err(|_| AppError::code("inoreaderOauthFailed"))?;
+            let mut request = vec![0_u8; 8192];
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::io::AsyncReadExt::read(&mut socket, &mut request),
+            )
+            .await
+            .map_err(|_| AppError::code("inoreaderOauthFailed"))?
+            .map_err(|_| AppError::code("inoreaderOauthFailed"))?;
+            let request = String::from_utf8_lossy(&request[..read]);
+            let target = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|target| url::Url::parse(&format!("http://127.0.0.1{target}")).ok());
+            let Some(target) = target else {
+                let _ = tokio::io::AsyncWriteExt::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+                continue;
+            };
+            if target.path() != "/oauth/callback" {
+                let _ = tokio::io::AsyncWriteExt::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+                continue;
+            }
+            let params: std::collections::HashMap<_, _> = target.query_pairs().into_owned().collect();
+            let returned_state = params.get("state").map(String::as_str).unwrap_or_default();
+            if returned_state != state {
+                let _ = tokio::io::AsyncWriteExt::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+                continue;
+            }
+            let result = if let Some(error) = params.get("error") {
+                Err(if error == "access_denied" {
+                    AppError::code("inoreaderOauthCancelled")
+                } else {
+                    AppError::code("inoreaderOauthFailed")
+                })
+            } else {
+                params
+                    .get("code")
+                    .filter(|code| !code.is_empty())
+                    .cloned()
+                    .ok_or_else(|| AppError::code("inoreaderOauthFailed"))
+            };
+            let body = b"<!doctype html><meta charset=utf-8><title>Papr</title><body style='font:16px system-ui;padding:3rem;text-align:center'>Authorization complete. You can close this window and return to Papr.</body>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, body).await;
+            break result;
+        }
+    })
+    .await
+    .map_err(|_| AppError::code("inoreaderOauthCancelled"))??;
+
+    let state = app.state::<AppState>();
+    let http = state.http();
+    let tokens = crate::sync::exchange_inoreader_code(&http, &client_id, &client_secret, &code).await?;
+    crate::sync::finish_inoreader_oauth(&state.db, &http, tokens, &client_id, &client_secret).await
 }
 
 #[tauri::command]
@@ -1554,7 +1669,7 @@ pub async fn freshrss_status(app: AppHandle) -> AppResult<FreshRssStatus> {
     })
 }
 
-/// Run a full FreshRSS sync now; returns the number of reconciled articles.
+/// Run a full feed sync now; returns the number of reconciled articles.
 #[tauri::command]
 pub async fn freshrss_sync(app: AppHandle) -> AppResult<usize> {
     let n = {

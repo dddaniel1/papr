@@ -98,8 +98,20 @@ repair the binary path on re-run.)
 | Subscriptions | `subscribe`, `unsubscribe`, `feed`, `folder`, `folders`, `opml` |
 | Organise | `tags`, `tag`, `rules`, `rule`, `highlights`, `highlight` |
 | Newsletters | `newsletters`, `newsletter add/remove` |
-| Sync | `sync status/connect/disconnect/run` (FreshRSS / Miniflux) |
+| Sync | `sync status/connect/disconnect/run` (FreshRSS / Miniflux / Inoreader / Feedly) |
 | System | `settings`, `stats`, `admin`, `setup` |
+
+Connect a sync service with its credentials:
+
+```sh
+papr sync connect --provider freshrss --url https://rss.example.com --user me --password '<password>'
+papr sync connect --provider miniflux --url https://miniflux.example.com --user me --password '<greader-app-password>'
+papr sync connect --provider feedly --token '<api-token>'
+papr sync connect --provider inoreader --token '<access-token>'
+papr sync run
+```
+
+Inoreader's CLI token connection requires a new token when it expires. Use the desktop app's OAuth connection for automatic refresh; both clients share the same stored connection.
 
 Every command supports `--help`. Point at a non-default database with `--db <path>`
 or the `PAPR_DB` environment variable.

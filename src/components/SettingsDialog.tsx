@@ -20,6 +20,8 @@ import type { Feed, Rule, RuleAction, RuleField, RulePreview } from "../types";
 import Icon, { type IconName } from "./Icon";
 import ConfirmDialog from "./ConfirmDialog";
 import FeedAvatar from "./FeedAvatar";
+import ArchiveSettings from "./ArchiveSettings";
+import ServiceConnection from "./ServiceConnection";
 
 interface Props {
   onClose: () => void;
@@ -1442,25 +1444,57 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
     queryKey: ["freshrss-status"],
     queryFn: api.freshrssStatus,
   });
-  const [provider, setProvider] = useState<api.GReaderProvider>("freshrss");
   const [url, setUrl] = useState("");
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
+  const [token, setToken] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const connected = status.data?.connected ?? false;
-  const connectedProvider: api.GReaderProvider =
+  const connectedProvider: api.FeedSyncProvider =
     status.data?.provider ?? "freshrss";
-  const providerLabel = (p: api.GReaderProvider) =>
-    p === "miniflux" ? "Miniflux" : "FreshRSS";
+  const providers: api.FeedSyncProvider[] = [
+    "freshrss",
+    "miniflux",
+    "inoreader",
+    "feedly",
+  ];
+  const providerLabel = (provider: api.FeedSyncProvider) => {
+    switch (provider) {
+      case "miniflux":
+        return t("settings.sync.providerMiniflux");
+      case "inoreader":
+        return t("settings.sync.providerInoreader");
+      case "feedly":
+        return t("settings.sync.providerFeedly");
+      default:
+        return t("settings.sync.providerFreshrss");
+    }
+  };
 
-  const connect = async () => {
-    if (!url.trim() || !user.trim()) return;
+  const resetSecrets = () => {
+    setPass("");
+    setToken("");
+    setClientSecret("");
+  };
+
+  const connect = async (provider: api.FeedSyncProvider) => {
     setBusy(true);
     try {
-      await api.freshrssConnect(url.trim(), user.trim(), pass, provider);
+      if (provider === "feedly") {
+        if (!token.trim()) return;
+        await api.feedlyConnect(token.trim());
+      } else if (provider === "inoreader") {
+        if (!clientId.trim() || !clientSecret.trim()) return;
+        await api.inoreaderConnectOauth(clientId.trim(), clientSecret.trim());
+      } else {
+        if (!url.trim() || !user.trim()) return;
+        await api.freshrssConnect(url.trim(), user.trim(), pass, provider);
+      }
       await qc.invalidateQueries({ queryKey: ["freshrss-status"] });
       onToast(t("settings.sync.connected"));
-      setPass("");
+      resetSecrets();
     } catch (e) {
       reportError(e);
     } finally {
@@ -1496,150 +1530,204 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
     }
   };
 
-  const unavailable = [
-    { name: "Feedly", initial: "F", color: "#2BB24C", reason: t("settings.sync.reasonOauth") },
-    { name: "Inoreader", initial: "I", color: "#1976D2", reason: t("settings.sync.reasonOauth") },
-    { name: "iCloud", initial: "☁", color: "#0089E0", reason: t("settings.sync.reasonEntitlements") },
-  ];
+  const canConnect = (provider: api.FeedSyncProvider) => {
+    if (provider === "feedly") return Boolean(token.trim());
+    if (provider === "inoreader") {
+      return Boolean(clientId.trim() && clientSecret.trim());
+    }
+    return Boolean(url.trim() && user.trim());
+  };
 
   return (
     <>
       <div className="settings-group">
-        <h3 className="settings-group-title">{t("settings.sync.greader")}</h3>
-        {connected ? (
-          <>
-            <div className="s-service">
-              <div
-                className="logo"
-                style={{
-                  background:
-                    connectedProvider === "miniflux" ? "#1F7AEC" : "#4A4A4A",
-                }}
-              >
-                {connectedProvider === "miniflux" ? "M" : "⚡"}
-              </div>
-              <div className="info">
-                <div className="title">{providerLabel(connectedProvider)}</div>
-                <div className="desc">{status.data?.url}</div>
-              </div>
-              <span className="status on">{t("settings.sync.statusConnected")}</span>
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button
-                className="s-btn primary"
-                onClick={syncNow}
-                disabled={busy}
-              >
-                <Icon name="refresh" size={12} />{" "}
-                {busy ? t("settings.sync.syncing") : t("settings.sync.syncNow")}
-              </button>
-              <button className="s-btn" onClick={disconnect} disabled={busy}>
-                {t("settings.sync.disconnect")}
-              </button>
-            </div>
-            <p
-              style={{
-                fontSize: 12,
-                color: "var(--muted)",
-                marginTop: 12,
-                lineHeight: 1.5,
-              }}
-            >
-              {t("settings.sync.syncHint")}
-            </p>
-          </>
-        ) : (
-          <>
-            <p className="modal-hint" style={{ marginBottom: 14 }}>
-              {t("settings.sync.connectHint")}
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <select
-                className="modal-input"
-                style={{ margin: 0 }}
-                value={provider}
-                onChange={(e) =>
-                  setProvider(e.target.value as api.GReaderProvider)
-                }
-                aria-label={t("settings.sync.provider")}
-              >
-                <option value="freshrss">
-                  {t("settings.sync.providerFreshrss")}
-                </option>
-                <option value="miniflux">
-                  {t("settings.sync.providerMiniflux")}
-                </option>
-              </select>
-              <input
-                className="modal-input"
-                style={{ margin: 0 }}
-                placeholder={t("settings.sync.serverPlaceholder")}
-                {...NO_AUTOCORRECT}
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-              <input
-                className="modal-input"
-                style={{ margin: 0 }}
-                placeholder={t("settings.sync.userPlaceholder")}
-                {...NO_AUTOCORRECT}
-                value={user}
-                onChange={(e) => setUser(e.target.value)}
-              />
-              <input
-                className="modal-input"
-                style={{ margin: 0 }}
-                type="password"
-                placeholder={
-                  provider === "miniflux"
-                    ? t("settings.sync.appPassPlaceholder")
-                    : t("settings.sync.passPlaceholder")
-                }
-                {...NO_AUTOCORRECT}
-                value={pass}
-                onChange={(e) => setPass(e.target.value)}
-              />
-              {provider === "miniflux" && (
+        <h3 className="settings-group-title">{t("settings.services.feedSync")}</h3>
+        <p className="service-group-hint">{t("settings.services.singleSync")}</p>
+        {providers.map((service) => (
+          <ServiceConnection
+            key={service}
+            service={service}
+            name={providerLabel(service)}
+            description={t("settings.services.syncDescription")}
+            connected={connected && connectedProvider === service}
+            status={t(
+              connected && connectedProvider === service
+                ? "settings.sync.statusConnected"
+                : "settings.services.notConfigured",
+            )}
+            onOpen={resetSecrets}
+          >
+            {connected && connectedProvider === service ? (
+              <>
+                <p className="service-group-hint">{status.data?.url}</p>
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button
+                    className="s-btn primary"
+                    onClick={syncNow}
+                    disabled={busy}
+                  >
+                    <Icon name="refresh" size={12} />{" "}
+                    {busy
+                      ? t("settings.sync.syncing")
+                      : t("settings.sync.syncNow")}
+                  </button>
+                  <button className="s-btn" onClick={disconnect} disabled={busy}>
+                    {t("settings.sync.disconnect")}
+                  </button>
+                </div>
                 <p
                   style={{
                     fontSize: 12,
                     color: "var(--muted)",
-                    margin: "2px 0 0",
+                    marginTop: 12,
                     lineHeight: 1.5,
                   }}
                 >
-                  {t("settings.sync.minifluxPassHint")}
+                  {t("settings.sync.syncHint")}
                 </p>
-              )}
-              <div>
-                <button
-                  className="s-btn primary"
-                  onClick={connect}
-                  disabled={busy || !url.trim() || !user.trim()}
-                >
-                  {busy ? t("settings.sync.connecting") : t("settings.sync.connect")}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-
-      <div className="settings-group">
-        <h3 className="settings-group-title">{t("settings.sync.otherServices")}</h3>
-        {unavailable.map((s) => (
-          <div key={s.name} className="s-service" style={{ opacity: 0.6 }}>
-            <div className="logo" style={{ background: s.color }}>
-              {s.initial}
-            </div>
-            <div className="info">
-              <div className="title">{s.name}</div>
-              <div className="desc">{s.reason}</div>
-            </div>
-            <span className="status">{t("settings.sync.statusUnavailable")}</span>
-          </div>
+              </>
+            ) : connected ? (
+              <p className="service-group-hint">
+                {t("settings.services.disconnectFirst", {
+                  service: providerLabel(connectedProvider),
+                })}
+              </p>
+            ) : (
+              <>
+                <p className="service-group-hint" style={{ marginBottom: 14 }}>
+                  {service === "inoreader"
+                    ? t("settings.sync.inoreaderOauthHint")
+                    : service === "feedly"
+                      ? t("settings.sync.feedlyTokenHint")
+                      : t("settings.sync.connectHint")}
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {(service === "freshrss" || service === "miniflux") && (
+                    <>
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        placeholder={t("settings.sync.serverPlaceholder")}
+                        {...NO_AUTOCORRECT}
+                        value={url}
+                        onChange={(e) => setUrl(e.target.value)}
+                      />
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        placeholder={t("settings.sync.userPlaceholder")}
+                        {...NO_AUTOCORRECT}
+                        value={user}
+                        onChange={(e) => setUser(e.target.value)}
+                      />
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        type="password"
+                        placeholder={
+                          service === "miniflux"
+                            ? t("settings.sync.appPassPlaceholder")
+                            : t("settings.sync.passPlaceholder")
+                        }
+                        {...NO_AUTOCORRECT}
+                        value={pass}
+                        onChange={(e) => setPass(e.target.value)}
+                      />
+                      {service === "miniflux" && (
+                        <p
+                          style={{
+                            fontSize: 12,
+                            color: "var(--muted)",
+                            margin: "2px 0 0",
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {t("settings.sync.minifluxPassHint")}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {service === "inoreader" && (
+                    <>
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        placeholder={t(
+                          "settings.sync.inoreaderClientIdPlaceholder",
+                        )}
+                        {...NO_AUTOCORRECT}
+                        value={clientId}
+                        onChange={(e) => setClientId(e.target.value)}
+                      />
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        type="password"
+                        placeholder={t(
+                          "settings.sync.inoreaderClientSecretPlaceholder",
+                        )}
+                        {...NO_AUTOCORRECT}
+                        value={clientSecret}
+                        onChange={(e) => setClientSecret(e.target.value)}
+                      />
+                      <p
+                        style={{
+                          fontSize: 12,
+                          color: "var(--muted)",
+                          margin: "2px 0 0",
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {t("settings.sync.inoreaderRedirectHint", {
+                          redirect: "http://127.0.0.1:19812/oauth/callback",
+                        })}
+                      </p>
+                    </>
+                  )}
+                  {service === "feedly" && (
+                    <>
+                      <input
+                        className="modal-input"
+                        style={{ margin: 0 }}
+                        type="password"
+                        placeholder={t("settings.sync.feedlyTokenPlaceholder")}
+                        {...NO_AUTOCORRECT}
+                        value={token}
+                        onChange={(e) => setToken(e.target.value)}
+                      />
+                      <p
+                        style={{
+                          fontSize: 12,
+                          color: "var(--muted)",
+                          margin: "2px 0 0",
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {t("settings.sync.feedlyTokenHint")}
+                      </p>
+                    </>
+                  )}
+                  <div>
+                    <button
+                      className="s-btn primary"
+                      onClick={() => connect(service)}
+                      disabled={busy || !canConnect(service)}
+                    >
+                      {busy
+                        ? t("settings.sync.connecting")
+                        : service === "inoreader"
+                          ? t("settings.sync.inoreaderConnectOauth")
+                          : t("settings.sync.connect")}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </ServiceConnection>
         ))}
       </div>
+
+      <ArchiveSettings />
     </>
   );
 }

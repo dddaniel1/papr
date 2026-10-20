@@ -8,6 +8,7 @@
 // `crate::ingestion`, etc. unchanged.
 pub use papr_core::{ai, db, error, extraction, ingestion, models, opml, sanitize, sync};
 
+mod archive_commands;
 mod backing;
 mod commands;
 mod notify;
@@ -315,6 +316,14 @@ pub fn run() {
             commands::import_opml,
             commands::export_opml,
             commands::save_text_file,
+            archive_commands::get_archive_settings,
+            archive_commands::configure_obsidian,
+            archive_commands::validate_obsidian,
+            archive_commands::choose_obsidian_vault,
+            archive_commands::configure_notion,
+            archive_commands::validate_notion,
+            archive_commands::disconnect_archive_service,
+            archive_commands::archive_article,
             commands::get_setting,
             commands::set_setting,
             commands::configure_ai_provider,
@@ -332,6 +341,9 @@ pub fn run() {
             commands::clear_articles,
             commands::apply_network_settings,
             commands::freshrss_connect,
+            commands::feedly_connect,
+            commands::inoreader_connect_token,
+            commands::inoreader_connect_oauth,
             commands::freshrss_disconnect,
             commands::freshrss_status,
             commands::freshrss_sync,

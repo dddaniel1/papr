@@ -21,6 +21,7 @@ import Icon from "./Icon";
 import TagPicker from "./TagPicker";
 import ResizeHandle from "./ResizeHandle";
 import HighlightLayer from "./HighlightLayer";
+import ArchiveButtons from "./ArchiveButtons";
 import ContextMenu, { type MenuEntry } from "./ContextMenu";
 import Lightbox from "./Lightbox";
 
@@ -791,6 +792,7 @@ export default function Reader({ onToast }: Props) {
           bodyRef={bodyRef}
           bodyVersion={displayBody}
         />
+        <ArchiveButtons articleId={a.id} />
         <div className="tb-btn spacer" />
         {a.url && (
           <button

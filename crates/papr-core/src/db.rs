@@ -337,6 +337,13 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // this feed" — a local-only feed, or sync not linked — and the count
         // falls back to `COUNT(articles WHERE is_read = 0)`.
         M::up("ALTER TABLE feeds ADD COLUMN server_unread INTEGER;"),
+        M::up("CREATE TABLE article_archives (
+            article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            service TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            location TEXT NOT NULL,
+            PRIMARY KEY(article_id, service, destination)
+        );"),
     ])
 });
 
@@ -1864,13 +1871,29 @@ pub fn mark_all_read(
     Ok(n)
 }
 
-/// Whether a FreshRSS server is currently linked (a non-empty URL is stored).
+/// Whether any feed-sync service is currently linked. The setting key keeps
+/// its historical name for database compatibility; it now stores a canonical
+/// provider URL (for Feedly, the API endpoint).
 pub fn is_freshrss_connected(conn: &Connection) -> bool {
     get_setting(conn, "freshrss_url")
         .ok()
         .flatten()
         .map(|u| !u.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// Forget every provider-specific remote article id and queued local edit.
+/// Call this whenever the linked provider changes: GReader and Feedly ids are
+/// opaque and not interchangeable, so retaining them would push a change made
+/// under one service to the other.
+pub fn clear_sync_identity(conn: &Connection) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE articles SET remote_id = NULL WHERE remote_id IS NOT NULL", [])?;
+    tx.execute("DELETE FROM sync_queue", [])?;
+    tx.execute("DELETE FROM sync_ops", [])?;
+    tx.execute("UPDATE feeds SET server_unread = NULL", [])?;
+    tx.commit()?;
+    Ok(())
 }
 
 // ─────────────────────────── tags ───────────────────────────
@@ -2369,6 +2392,30 @@ pub fn set_highlight_color(conn: &Connection, id: i64, color: &str) -> AppResult
 pub fn delete_highlight(conn: &Connection, id: i64) -> AppResult<()> {
     conn.execute("DELETE FROM highlights WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+pub fn archive_location(conn: &Connection, article_id: i64, service: &str, destination: &str) -> AppResult<Option<String>> {
+    Ok(conn.query_row("SELECT location FROM article_archives WHERE article_id=?1 AND service=?2 AND destination=?3",
+        params![article_id, service, destination], |r| r.get(0)).optional()?)
+}
+
+pub fn save_archive_location(conn: &Connection, article_id: i64, service: &str, destination: &str, location: &str) -> AppResult<()> {
+    conn.execute("INSERT INTO article_archives VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(article_id, service, destination) DO UPDATE SET location=excluded.location",
+        params![article_id, service, destination, location])?;
+    Ok(())
+}
+
+pub fn reserve_obsidian_archive(conn: &Connection, article_id: i64, destination: &str) -> AppResult<String> {
+    conn.execute("INSERT OR IGNORE INTO article_archives VALUES (?1, 'obsidian', ?2, 'papr-' || lower(hex(randomblob(16))) || '.md')",
+        params![article_id, destination])?;
+    archive_location(conn, article_id, "obsidian", destination)?.ok_or_else(|| AppError::other("Could not reserve archive destination"))
+}
+
+pub fn reserve_notion_archive(conn: &Connection, article_id: i64, destination: &str) -> AppResult<String> {
+    conn.execute("INSERT OR IGNORE INTO article_archives VALUES (?1, 'notion', ?2, 'pending:papr-' || lower(hex(randomblob(16))))",
+        params![article_id, destination])?;
+    archive_location(conn, article_id, "notion", destination)?.ok_or_else(|| AppError::other("Could not reserve archive destination"))
 }
 
 // ─────────────────────────── settings ───────────────────────────
@@ -2910,28 +2957,28 @@ mod tests {
 
     #[test]
     fn startup_migrations_preserve_existing_databases() {
-        for version in [0, 19, 20, 21, 22, 23, 24] {
+        for version in [0, 19, 20, 21, 22, 23, 24, 25] {
             let path = std::env::temp_dir().join(format!("papr-migrations-{}-{}-{}.db",
                 std::process::id(), version,
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             let mut conn = Connection::open(&path).unwrap();
-            MIGRATIONS.to_version(&mut conn, version.min(23)).unwrap();
+            MIGRATIONS.to_version(&mut conn, version.min(24)).unwrap();
             if version > 0 {
                 conn.execute("INSERT INTO feeds(id,feed_url,title) VALUES(1,'https://example.com/rss','Preserved')", []).unwrap();
                 conn.execute("INSERT INTO articles(feed_id,guid,title,is_starred) VALUES(1,'one','Article',1)", []).unwrap();
             }
             if version >= 20 { conn.execute("UPDATE feeds SET custom_favicon=1", []).unwrap(); }
             if version >= 21 { conn.execute("UPDATE feeds SET position=42", []).unwrap(); }
-            if version == 24 { conn.pragma_update(None, "user_version", 24).unwrap(); }
+            if version == 25 { conn.pragma_update(None, "user_version", 25).unwrap(); }
             drop(conn);
             let result = open(&path);
-            if version == 24 {
+            if version == 25 {
                 assert!(result.is_err());
                 let conn = Connection::open(&path).unwrap();
-                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 24);
+                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 25);
             } else {
                 let conn = result.unwrap();
-                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 23);
+                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 24);
                 if version > 0 {
                     let values: (String,i64,i64) = conn.query_row("SELECT title,custom_favicon,position FROM feeds WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
                     assert_eq!(values, ("Preserved".into(), i64::from(version>=20), if version>=21 {42} else {0}));
@@ -4000,6 +4047,29 @@ mod tests {
     }
 
     // ── clear all articles / subscriptions ──────────────────────────────
+
+    #[test]
+    fn clear_sync_identity_forgets_remote_state_but_keeps_articles() {
+        let (conn, aid) = test_db();
+        set_remote_id(&conn, aid, "remote-1").unwrap();
+        enqueue_sync(&conn, aid, "read", true).unwrap();
+        enqueue_op(&conn, OP_UNSUBSCRIBE, "https://example.com/feed.xml", None).unwrap();
+        conn.execute("UPDATE feeds SET server_unread = 7", []).unwrap();
+
+        clear_sync_identity(&conn).unwrap();
+
+        let remote_id: Option<String> = conn
+            .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remote_id, None);
+        assert!(pending_sync_article_ids(&conn).unwrap().is_empty());
+        assert!(list_ops(&conn).unwrap().is_empty());
+        let unread: Option<i64> = conn
+            .query_row("SELECT server_unread FROM feeds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unread, None);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM articles", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
 
     #[test]
     fn clear_articles_keeps_subscriptions_and_writes_no_tombstone() {

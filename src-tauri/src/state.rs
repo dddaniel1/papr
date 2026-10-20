@@ -28,6 +28,8 @@ pub struct AppState {
     /// command and the periodic scheduler can otherwise fire concurrently —
     /// `try_lock` lets a second run bow out instead of duplicating the work.
     pub refresh_lock: Mutex<()>,
+    /// Serializes archive writes and configuration changes across destinations.
+    pub archive_lock: Mutex<()>,
     /// A `papr://subscribe` URL delivered before the webview registered its
     /// `deep-link-subscribe` listener — typically a cold-start launch where the
     /// link arrives during `setup()`. The frontend drains this once on mount
@@ -46,6 +48,7 @@ impl AppState {
             next_reader: AtomicUsize::new(0),
             http: RwLock::new(http),
             refresh_lock: Mutex::new(()),
+            archive_lock: Mutex::new(()),
             pending_deep_link: std::sync::Mutex::new(None),
         }
     }

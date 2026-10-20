@@ -1,49 +1,41 @@
-//! Synchronisation over the Google Reader compatible API.
+//! Feed synchronisation for GReader-compatible services and Feedly.
 //!
-//! Supports any GReader-compatible backend; today FreshRSS and Miniflux.
-//! Protocol is identical (`ClientLogin`, `reader/api/0/edit-tag`,
-//! `stream/contents/...`, `com.google/*` tags) — only the API root path
-//! differs per provider, so the `Provider` enum centralises that mapping.
+//! FreshRSS, Miniflux and Inoreader share the Google Reader protocol. FreshRSS
+//! and Miniflux authenticate with ClientLogin; Inoreader uses OAuth bearer
+//! tokens. Feedly exposes its own v3 API, implemented below as a separate
+//! adapter so its collection, stream and marker semantics stay explicit.
 //!
-//! Flow: `ClientLogin` for an auth token, push any queued local read/starred
-//! changes via `edit-tag`, drain queued feed-/folder-level operations
-//! (`subscription/edit` unsubscribe, `rename-tag`, `disable-tag`,
-//! `mark-all-as-read`), pull the subscription list and the folder (`tag/list`)
-//! list, converge the two subscription lists (subscribe local-only feeds, file
-//! feeds into folders, push hand-set titles), then pull the recent reading-list
-//! (to reconcile read/starred state, matched to local articles by URL).
+//! The persisted setting keys keep their historical `freshrss_*` names. They
+//! now store provider-neutral connection state so existing installations keep
+//! working without a migration.
 
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion::parse;
 use reqwest::{Client, RequestBuilder};
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 
-/// The writer connection behind an async mutex — what every sync function reads
-/// and writes through. The desktop app passes `state.db`; the CLI passes the
-/// connection it opened. Paired with a shared [`Client`] for the HTTP calls.
 type Db = Mutex<Connection>;
 
 const READ_TAG: &str = "user/-/state/com.google/read";
 const STARRED_TAG: &str = "user/-/state/com.google/starred";
 const READING_LIST: &str = "user/-/state/com.google/reading-list";
-/// GReader "label" stream prefix. Folders are labels server-side, so a feed is
-/// filed by adding/removing `user/-/label/NAME` on its subscription.
 const LABEL_PREFIX: &str = "user/-/label/";
+const INOREADER_BASE: &str = "https://www.inoreader.com";
+const FEEDLY_BASE: &str = "https://api.feedly.com";
+/// Inoreader requires the redirect URI to be registered exactly in the app.
+/// A fixed loopback port keeps that registration stable across launches.
+pub const INOREADER_REDIRECT_URI: &str = "http://127.0.0.1:19812/oauth/callback";
+const FEEDLY_UNFILED_LABEL: &str = "Papr";
 
-/// The GReader label stream id for a folder name.
 fn label_stream(name: &str) -> String {
     format!("{LABEL_PREFIX}{name}")
 }
 
-/// The `(add, remove)` label pair a folder change needs, or `None` when both
-/// sides already agree. `local` wins on conflict — a feed the user has filed by
-/// hand is not yanked back to the server's folder. Adding the new label is
-/// enough for FreshRSS; the matching removal keeps other GReader servers from
-/// leaving the feed filed under both.
 fn folder_change(
     local: Option<&str>,
     server: Option<&str>,
@@ -54,77 +46,126 @@ fn folder_change(
     Some((local.map(label_stream), server.map(label_stream)))
 }
 
-/// Which GReader-compatible backend the user is connected to. The wire
-/// protocol is identical; only where the API root sits under the server URL
-/// differs (FreshRSS mounts it at `/api/greader.php`, Miniflux serves it at
-/// the server root).
-#[derive(Clone, Copy)]
-enum Provider {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provider {
     FreshRss,
     Miniflux,
+    Inoreader,
+    Feedly,
 }
 
 impl Provider {
-    /// Path segment to append to the user-supplied server URL to reach the
-    /// GReader API root. Miniflux serves `/accounts/ClientLogin` and
-    /// `/reader/api/0/...` straight off the server root, so its suffix is
-    /// empty.
     fn path_suffix(self) -> &'static str {
         match self {
             Provider::FreshRss => "/api/greader.php",
-            Provider::Miniflux => "",
+            Provider::Miniflux | Provider::Inoreader => "",
+            Provider::Feedly => "",
         }
     }
 
-    /// Parse the persisted setting. Missing / unknown → FreshRss, so older
-    /// installs (where this setting didn't exist) keep working unchanged.
     fn from_setting(s: Option<&str>) -> Self {
-        match s.unwrap_or("").trim() {
+        match s.unwrap_or("").trim().to_ascii_lowercase().as_str() {
             "miniflux" => Provider::Miniflux,
+            "inoreader" => Provider::Inoreader,
+            "feedly" => Provider::Feedly,
             _ => Provider::FreshRss,
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Provider::FreshRss => "freshrss",
             Provider::Miniflux => "miniflux",
+            Provider::Inoreader => "inoreader",
+            Provider::Feedly => "feedly",
         }
     }
+
 }
 
-/// Normalise a user-supplied server URL to its GReader API root for the
-/// chosen provider. Idempotent: if the user already typed the full path,
-/// don't append it again.
 fn greader_base(url: &str, provider: Provider) -> String {
+    if provider == Provider::Inoreader {
+        return INOREADER_BASE.to_string();
+    }
     let t = url.trim().trim_end_matches('/');
     let suffix = provider.path_suffix();
-    if t.ends_with(suffix) || t.contains(&format!("{suffix}/")) {
+    if suffix.is_empty() || t.ends_with(suffix) || t.contains(&format!("{suffix}/")) {
         t.to_string()
     } else {
         format!("{t}{suffix}")
     }
 }
 
-/// An authenticated FreshRSS session.
+fn feedly_base(url: &str) -> String {
+    let t = url.trim().trim_end_matches('/');
+    if t.is_empty() {
+        FEEDLY_BASE.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+fn encode_path(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn feedly_feed_id(url: &str) -> String {
+    format!("feed/{url}")
+}
+
+fn feedly_feed_url(id: &str) -> String {
+    id.strip_prefix("feed/").unwrap_or(id).to_string()
+}
+
+fn feedly_collection_is_unfiled(label: &str) -> bool {
+    label.eq_ignore_ascii_case(FEEDLY_UNFILED_LABEL)
+        || label.eq_ignore_ascii_case("Uncategorized")
+}
+
 struct Session {
     base: String,
     auth: String,
-    token: String,
+    token: Option<String>,
+    bearer: bool,
 }
 
 impl Session {
-    fn get(&self, http: &Client, path: &str) -> RequestBuilder {
-        http.get(format!("{}/reader/api/0/{path}", self.base))
-            .header("Authorization", format!("GoogleLogin auth={}", self.auth))
+    fn authorize(&self, req: RequestBuilder) -> RequestBuilder {
+        if self.bearer {
+            req.bearer_auth(&self.auth)
+        } else {
+            req.header("Authorization", format!("GoogleLogin auth={}", self.auth))
+        }
     }
+
+    fn get(&self, http: &Client, path: &str) -> RequestBuilder {
+        self.authorize(http.get(format!("{}/reader/api/0/{path}", self.base)))
+    }
+
     fn post(&self, http: &Client, path: &str) -> RequestBuilder {
-        http.post(format!("{}/reader/api/0/{path}", self.base))
-            .header("Authorization", format!("GoogleLogin auth={}", self.auth))
+        self.authorize(http.post(format!("{}/reader/api/0/{path}", self.base)))
+    }
+
+    fn post_form<'a>(
+        &'a self,
+        http: &Client,
+        path: &str,
+        mut form: Vec<(&'a str, &'a str)>,
+    ) -> RequestBuilder {
+        if let Some(token) = self.token.as_deref() {
+            form.push(("T", token));
+        }
+        self.post(http, path).form(&form)
     }
 }
 
-/// Exchange username + password for a long-lived auth token.
 async fn client_login(http: &Client, base: &str, user: &str, pass: &str) -> AppResult<String> {
     let resp = http
         .post(format!("{base}/accounts/ClientLogin"))
@@ -142,9 +183,20 @@ async fn client_login(http: &Client, base: &str, user: &str, pass: &str) -> AppR
         .ok_or_else(|| AppError::code("freshrssNoToken"))
 }
 
-/// Build a session from an existing auth token by fetching a fresh write
-/// (edit-tag) token. Fails fast if the auth token is no longer valid.
-async fn session_with_token(http: &Client, base: &str, auth: String) -> AppResult<Session> {
+async fn session_with_token(
+    http: &Client,
+    base: &str,
+    auth: String,
+    provider: Provider,
+) -> AppResult<Session> {
+    if provider == Provider::Inoreader {
+        return Ok(Session {
+            base: base.to_string(),
+            auth,
+            token: None,
+            bearer: true,
+        });
+    }
     let token = http
         .get(format!("{base}/reader/api/0/token"))
         .header("Authorization", format!("GoogleLogin auth={auth}"))
@@ -159,14 +211,14 @@ async fn session_with_token(http: &Client, base: &str, auth: String) -> AppResul
     Ok(Session {
         base: base.to_string(),
         auth,
-        token,
+        token: Some(token),
+        bearer: false,
     })
 }
 
-/// Log in with username + password and obtain a full session.
 async fn login(http: &Client, base: &str, user: &str, pass: &str) -> AppResult<Session> {
     let auth = client_login(http, base, user, pass).await?;
-    session_with_token(http, base, auth).await
+    session_with_token(http, base, auth, Provider::FreshRss).await
 }
 
 #[derive(Deserialize)]
@@ -176,8 +228,6 @@ struct SubList {
 }
 #[derive(Deserialize)]
 struct Sub {
-    /// Server-side subscription id (`feed/<n>`), shared with `unread-count` so
-    /// the two responses can be joined.
     #[serde(default)]
     id: Option<String>,
     url: Option<String>,
@@ -185,8 +235,6 @@ struct Sub {
     #[serde(default)]
     categories: Vec<SubCat>,
 }
-/// A GReader category ("label") a subscription belongs to. FreshRSS/Miniflux
-/// folders surface here; we map the first named one onto a local folder.
 #[derive(Deserialize)]
 struct SubCat {
     #[serde(default)]
@@ -195,14 +243,6 @@ struct SubCat {
     label: Option<String>,
 }
 impl SubCat {
-    /// Human folder name for this category. Prefer the explicit `label`,
-    /// otherwise derive it from the `user/-/label/NAME` id. `None` for an
-    /// unnamed category, so it is skipped rather than creating a blank folder.
-    ///
-    /// FreshRSS files every feed the user hasn't categorised under a built-in
-    /// "Uncategorized" label. That isn't a real folder — mapping it onto a
-    /// local one buries every top-level feed in a junk folder that doesn't
-    /// match the server's own presentation — so it is treated as no folder.
     fn folder_name(&self) -> Option<String> {
         self.label
             .as_deref()
@@ -223,7 +263,6 @@ impl SubCat {
 struct Contents {
     #[serde(default)]
     items: Vec<Item>,
-    // Present when the stream has more pages; fed back as `c=` to page on.
     #[serde(default)]
     continuation: Option<String>,
 }
@@ -240,9 +279,6 @@ struct Href {
     href: String,
 }
 
-/// `tag/list` response. FreshRSS returns folders as `user/-/label/*` entries
-/// tagged `type: "folder"` and article tags as `type: "tag"`; older/Miniflux
-/// servers may omit `type`, so it is optional.
 #[derive(Deserialize)]
 struct TagList {
     #[serde(default)]
@@ -255,11 +291,7 @@ struct Tag {
     #[serde(default, rename = "type")]
     kind: Option<String>,
 }
-
 impl Tag {
-    /// The folder name this tag denotes, or `None` for anything that isn't a
-    /// real folder. A `type` of "tag" (a FreshRSS article label) or the built-in
-    /// "Uncategorized" bucket is skipped, matching `SubCat::folder_name`.
     fn folder_name(&self) -> Option<String> {
         let name = self.id.strip_prefix(LABEL_PREFIX)?.trim();
         if name.is_empty() || name.eq_ignore_ascii_case("Uncategorized") {
@@ -272,9 +304,6 @@ impl Tag {
     }
 }
 
-/// `unread-count` response: one entry per feed (`feed/<n>`), per label, and a
-/// `reading-list` total. We only need the per-feed counts, joined to local
-/// feeds via the subscription ids.
 #[derive(Deserialize)]
 struct UnreadCounts {
     #[serde(default)]
@@ -288,21 +317,18 @@ struct UnreadCount {
     count: i64,
 }
 
-/// Stored GReader connection. We persist the long-lived auth token rather
-/// than the password — a leaked token is revocable server-side and can't be
-/// replayed against the user's other accounts. `legacy_pass` holds a
-/// plaintext password from an older install, awaiting one-time migration.
 struct Creds {
     url: String,
     user: String,
     auth: Option<String>,
     legacy_pass: Option<String>,
     provider: Provider,
+    refresh_token: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    token_expires_at: Option<i64>,
 }
 
-/// Stored GReader credentials, if a server is configured. The setting keys
-/// are still named `freshrss_*` for backwards compatibility with installs
-/// that predate multi-provider support — the values are provider-agnostic.
 async fn creds(db: &Db) -> AppResult<Option<Creds>> {
     let conn = db.lock().await;
     let url = db::get_setting(&conn, "freshrss_url")?.unwrap_or_default();
@@ -310,23 +336,73 @@ async fn creds(db: &Db) -> AppResult<Option<Creds>> {
     let nonempty = |k| db::get_setting(&conn, k).map(|v| v.filter(|s| !s.is_empty()));
     let auth = nonempty("freshrss_auth")?;
     let legacy_pass = nonempty("freshrss_pass")?;
-    let provider = Provider::from_setting(
-        db::get_setting(&conn, "freshrss_provider")?.as_deref(),
-    );
+    let provider = Provider::from_setting(db::get_setting(&conn, "freshrss_provider")?.as_deref());
+    let refresh_token = nonempty("sync_refresh_token")?;
+    let client_id = nonempty("inoreader_client_id")?;
+    let client_secret = nonempty("inoreader_client_secret")?;
+    let token_expires_at = nonempty("sync_token_expires_at")?
+        .and_then(|v| v.parse::<i64>().ok());
     if url.trim().is_empty() || user.is_empty() || (auth.is_none() && legacy_pass.is_none()) {
         return Ok(None);
     }
-    Ok(Some(Creds { url, user, auth, legacy_pass, provider }))
+    Ok(Some(Creds {
+        url,
+        user,
+        auth,
+        legacy_pass,
+        provider,
+        refresh_token,
+        client_id,
+        client_secret,
+        token_expires_at,
+    }))
 }
 
-/// The configured GReader server URL and provider, or `None` when not
-/// connected.
 pub async fn connected_url(db: &Db) -> AppResult<Option<(String, String)>> {
     Ok(creds(db).await?.map(|c| (c.url, c.provider.as_str().to_string())))
 }
 
-/// Persist a verified connection, storing the auth token and never the
-/// password (any legacy stored password is also cleared).
+#[allow(clippy::too_many_arguments)]
+async fn persist_connection(
+    db: &Db,
+    url: &str,
+    user: &str,
+    auth: &str,
+    provider: Provider,
+    refresh_token: Option<&str>,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    token_expires_at: Option<i64>,
+) -> AppResult<()> {
+    let conn = db.lock().await;
+    let old_url = db::get_setting(&conn, "freshrss_url")?.unwrap_or_default();
+    let old_user = db::get_setting(&conn, "freshrss_user")?.unwrap_or_default();
+    let old_provider = Provider::from_setting(
+        db::get_setting(&conn, "freshrss_provider")?.as_deref(),
+    );
+    if !old_url.trim().is_empty()
+        && (old_provider != provider
+            || old_url.trim() != url.trim()
+            || old_user != user)
+    {
+        db::clear_sync_identity(&conn)?;
+    }
+    db::set_setting(&conn, "freshrss_url", url.trim())?;
+    db::set_setting(&conn, "freshrss_user", user)?;
+    db::set_setting(&conn, "freshrss_auth", auth)?;
+    db::set_setting(&conn, "freshrss_pass", "")?;
+    db::set_setting(&conn, "freshrss_provider", provider.as_str())?;
+    db::set_setting(&conn, "sync_refresh_token", refresh_token.unwrap_or(""))?;
+    db::set_setting(&conn, "inoreader_client_id", client_id.unwrap_or(""))?;
+    db::set_setting(&conn, "inoreader_client_secret", client_secret.unwrap_or(""))?;
+    db::set_setting(
+        &conn,
+        "sync_token_expires_at",
+        &token_expires_at.map(|v| v.to_string()).unwrap_or_default(),
+    )?;
+    Ok(())
+}
+
 async fn persist_session(
     db: &Db,
     url: &str,
@@ -334,16 +410,9 @@ async fn persist_session(
     auth: &str,
     provider: Provider,
 ) -> AppResult<()> {
-    let conn = db.lock().await;
-    db::set_setting(&conn, "freshrss_url", url.trim())?;
-    db::set_setting(&conn, "freshrss_user", user)?;
-    db::set_setting(&conn, "freshrss_auth", auth)?;
-    db::set_setting(&conn, "freshrss_pass", "")?;
-    db::set_setting(&conn, "freshrss_provider", provider.as_str())?;
-    Ok(())
+    persist_connection(db, url, user, auth, provider, None, None, None, None).await
 }
 
-/// Verify credentials against the server and, on success, persist them.
 pub async fn connect(
     db: &Db,
     http: &Client,
@@ -353,12 +422,57 @@ pub async fn connect(
     provider: Option<&str>,
 ) -> AppResult<()> {
     let provider = Provider::from_setting(provider);
+    if provider == Provider::Feedly {
+        return connect_feedly(db, http, pass).await;
+    }
+    if provider == Provider::Inoreader {
+        return connect_inoreader_token(db, http, pass).await;
+    }
     let base = greader_base(url, provider);
-    let session = login(http, &base, user, pass).await?; // verifies credentials
+    let session = login(http, &base, user, pass).await?;
     persist_session(db, url, user, &session.auth, provider).await
 }
 
-/// Forget the stored GReader credentials.
+pub async fn connect_feedly(db: &Db, http: &Client, token: &str) -> AppResult<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(AppError::code("feedlyTokenRequired"));
+    }
+    let profile = feedly_profile(http, token).await?;
+    persist_connection(
+        db,
+        FEEDLY_BASE,
+        &profile.id,
+        token,
+        Provider::Feedly,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+pub async fn connect_inoreader_token(db: &Db, http: &Client, token: &str) -> AppResult<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(AppError::code("inoreaderTokenRequired"));
+    }
+    let user = inoreader_user_id(http, token).await?;
+    persist_connection(
+        db,
+        INOREADER_BASE,
+        &user,
+        token,
+        Provider::Inoreader,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
 pub async fn disconnect(db: &Db) -> AppResult<()> {
     let conn = db.lock().await;
     for key in [
@@ -367,17 +481,18 @@ pub async fn disconnect(db: &Db) -> AppResult<()> {
         "freshrss_auth",
         "freshrss_pass",
         "freshrss_provider",
+        "sync_refresh_token",
+        "inoreader_client_id",
+        "inoreader_client_secret",
+        "sync_token_expires_at",
     ] {
         db::set_setting(&conn, key, "")?;
     }
-    // Drop the cached server unread counts too — with no server there is no
-    // authoritative figure, so the sidebar reverts to local counts.
+    db::clear_sync_identity(&conn)?;
     db::clear_server_unread(&conn)?;
     Ok(())
 }
 
-/// Run a full sync if a server is connected. Returns `true` when a sync
-/// actually ran, so the caller can refresh the UI for the reconciled state.
 pub async fn run_if_connected(db: &Db, http: &Client) -> AppResult<bool> {
     if creds(db).await?.is_some() {
         sync_now(db, http).await.map(|_| true)
@@ -386,10 +501,8 @@ pub async fn run_if_connected(db: &Db, http: &Client) -> AppResult<bool> {
     }
 }
 
-/// Drain queued feed-/folder-level operations (unsubscribe, folder rename or
-/// delete, bulk mark-read). Unlike the article queue these are destructive —
-/// the local row they described is already gone — so a failed push is left in
-/// `sync_ops` to retry on the next sync rather than dropped.
+// ─────────────────────────── GReader flow ───────────────────────────
+
 async fn push_ops(db: &Db, http: &Client, session: &Session) {
     let ops = {
         let conn = db.lock().await;
@@ -402,13 +515,11 @@ async fn push_ops(db: &Db, http: &Client, session: &Session) {
         }
     };
     for op in ops {
-        let token = session.token.as_str();
         let ok = match op.kind.as_str() {
             db::OP_UNSUBSCRIBE => {
                 let stream = format!("feed/{}", op.target);
                 session
-                    .post(http, "subscription/edit")
-                    .form(&[("ac", "unsubscribe"), ("s", stream.as_str()), ("T", token)])
+                    .post_form(http, "subscription/edit", vec![("ac", "unsubscribe"), ("s", stream.as_str())])
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
@@ -418,8 +529,7 @@ async fn push_ops(db: &Db, http: &Client, session: &Session) {
                 let from = label_stream(&op.target);
                 let to = label_stream(op.value.as_deref().unwrap_or_default());
                 session
-                    .post(http, "rename-tag")
-                    .form(&[("s", from.as_str()), ("dest", to.as_str()), ("T", token)])
+                    .post_form(http, "rename-tag", vec![("s", from.as_str()), ("dest", to.as_str())])
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
@@ -428,8 +538,7 @@ async fn push_ops(db: &Db, http: &Client, session: &Session) {
             db::OP_DELETE_FOLDER => {
                 let stream = label_stream(&op.target);
                 session
-                    .post(http, "disable-tag")
-                    .form(&[("s", stream.as_str()), ("T", token)])
+                    .post_form(http, "disable-tag", vec![("s", stream.as_str())])
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
@@ -438,8 +547,11 @@ async fn push_ops(db: &Db, http: &Client, session: &Session) {
             db::OP_MARK_ALL_READ => {
                 let ts = op.value.as_deref().unwrap_or("0");
                 session
-                    .post(http, "mark-all-as-read")
-                    .form(&[("s", op.target.as_str()), ("ts", ts), ("T", token)])
+                    .post_form(
+                        http,
+                        "mark-all-as-read",
+                        vec![("s", op.target.as_str()), ("ts", ts)],
+                    )
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
@@ -461,25 +573,13 @@ async fn push_ops(db: &Db, http: &Client, session: &Session) {
     }
 }
 
-/// The server's subscription view, built from `subscription/list` and diffed
-/// against local state to decide what to push.
 struct ServerSubs {
     urls: HashSet<String>,
     folder: HashMap<String, Option<String>>,
     title: HashMap<String, String>,
-    /// Server subscription id (`feed/<n>`) → feed URL, to join the
-    /// `unread-count` response (keyed by the same id) back onto local feeds.
     id_to_url: HashMap<String, String>,
 }
 
-/// Push the local subscription state onto the server: subscribe feeds the
-/// server lacks, and — for feeds both sides carry — reconcile the folder label
-/// and (when the user renamed it by hand) the title, local winning. `skip` is
-/// the set of feed URLs with a pending unsubscribe whose push hasn't landed, so
-/// a re-added feed isn't subscribed while its delete is still in flight.
-/// `stale_folders` names folders with a queued rename/delete still live on the
-/// server under that name; a feed still filed there is left alone rather than
-/// fought.
 async fn push_subscriptions(
     http: &Client,
     session: &Session,
@@ -488,40 +588,36 @@ async fn push_subscriptions(
     skip: &HashSet<String>,
     stale_folders: &HashSet<String>,
 ) {
-    let token = session.token.as_str();
     for feed in local {
         if skip.contains(&feed.url) {
             continue;
         }
         let stream = format!("feed/{}", feed.url);
         if !server.urls.contains(&feed.url) {
-            // Local-only feed: subscribe it, filing it into its folder in the
-            // same call when it has one (the server creates the label on demand).
             let label = feed.folder.as_deref().map(label_stream);
             let mut form = vec![("ac", "subscribe"), ("s", stream.as_str())];
             if let Some(label) = label.as_deref() {
                 form.push(("a", label));
             }
-            form.push(("T", token));
-            if !session
-                .post(http, "subscription/edit")
-                .form(&form)
+            if session
+                .post_form(http, "subscription/edit", form)
                 .send()
                 .await
                 .and_then(|r| r.error_for_status())
-                .is_ok()
+                .is_err()
             {
                 log::warn!("sync: failed to subscribe server to {}", feed.url);
             }
             continue;
         }
 
-        // Present on both sides: align folder membership. Skip a feed the server
-        // still files under a folder whose rename/delete is queued — that op, not
-        // a move, is what reconciles it.
         let server_folder = server.folder.get(&feed.url).cloned().flatten();
-        if !server_folder.as_deref().is_some_and(|f| stale_folders.contains(f)) {
-            if let Some((add, remove)) = folder_change(feed.folder.as_deref(), server_folder.as_deref())
+        if !server_folder
+            .as_deref()
+            .is_some_and(|f| stale_folders.contains(f))
+        {
+            if let Some((add, remove)) =
+                folder_change(feed.folder.as_deref(), server_folder.as_deref())
             {
                 let mut form = vec![("ac", "edit"), ("s", stream.as_str())];
                 if let Some(add) = add.as_deref() {
@@ -530,37 +626,31 @@ async fn push_subscriptions(
                 if let Some(remove) = remove.as_deref() {
                     form.push(("r", remove));
                 }
-                form.push(("T", token));
-                if !session
-                    .post(http, "subscription/edit")
-                    .form(&form)
+                if session
+                    .post_form(http, "subscription/edit", form)
                     .send()
                     .await
                     .and_then(|r| r.error_for_status())
-                    .is_ok()
+                    .is_err()
                 {
                     log::warn!("sync: failed to file {} into its folder", feed.url);
                 }
             }
         }
 
-        // Align the title only when the user renamed the feed here, so a
-        // server-side title the user never touched is left alone.
         if feed.custom_title {
             if let Some(server_title) = server.title.get(&feed.url) {
                 if &feed.title != server_title
-                    && !session
-                        .post(http, "subscription/edit")
-                        .form(&[
-                            ("ac", "edit"),
-                            ("s", stream.as_str()),
-                            ("t", feed.title.as_str()),
-                            ("T", token),
-                        ])
+                    && session
+                        .post_form(
+                            http,
+                            "subscription/edit",
+                            vec![("ac", "edit"), ("s", stream.as_str()), ("t", feed.title.as_str())],
+                        )
                         .send()
                         .await
                         .and_then(|r| r.error_for_status())
-                        .is_ok()
+                        .is_err()
                 {
                     log::warn!("sync: failed to rename {}", feed.url);
                 }
@@ -569,11 +659,6 @@ async fn push_subscriptions(
     }
 }
 
-/// Pull the server's folder (label) list so folders that hold no feeds here yet
-/// still appear locally. Best-effort: a server without `tag/list` (some Miniflux
-/// builds) just skips it. `stale_folders` names folders with a pending local
-/// delete/rename, still live on the server under that name, so the pull can't
-/// resurrect one whose op hasn't reached the server.
 async fn pull_folders(db: &Db, http: &Client, session: &Session, stale_folders: &HashSet<String>) {
     let list: TagList = match session
         .get(http, "tag/list?output=json")
@@ -604,13 +689,6 @@ async fn pull_folders(db: &Db, http: &Client, session: &Session, stale_folders: 
     }
 }
 
-/// Pull the server's authoritative per-feed unread counts and cache them on
-/// `feeds.server_unread`, so the sidebar and badge show the server's figures
-/// (which include items Papr hasn't fetched). The response is keyed by server
-/// subscription id, joined to local feeds through `id_to_url`. Best-effort: a
-/// server without `unread-count` (or a decode failure) leaves the local counts
-/// in place. Feeds the server doesn't report have their cache cleared by
-/// `apply_server_unread`.
 async fn pull_unread_counts(
     db: &Db,
     http: &Client,
@@ -654,20 +732,11 @@ async fn pull_unread_counts(
     }
 }
 
-/// A single article the server flags as unread or starred: its item id and the
-/// canonical URL we match local articles on.
 struct RemoteItem {
     id: String,
     url: String,
 }
 
-/// Fetch every item of a GReader stream, following `continuation` pages. `xt`,
-/// when set, is an "exclude tag" filter (e.g. exclude read to get only unread).
-///
-/// Paging is capped: the sets we fetch this way (unread, starred) are bounded by
-/// what the user hasn't yet read/has starred — normally a few hundred items — so
-/// `MAX_PAGES` pages of `n=1000` (tens of thousands of items) is a generous
-/// ceiling that also stops a pathological server from looping us forever.
 async fn fetch_stream_items(
     session: &Session,
     http: &Client,
@@ -713,28 +782,85 @@ async fn fetch_stream_items(
     Ok(out)
 }
 
-/// Push queued changes, then pull subscriptions and read/starred state.
-/// Returns the number of local articles whose state was reconciled.
-pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
-    let creds = creds(db)
-        .await?
+async fn inoreader_refresh(
+    http: &Client,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> AppResult<OAuthTokens> {
+    let resp = http
+        .post(format!("{INOREADER_BASE}/oauth2/token"))
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(AppError::code("inoreaderOauthFailed"));
+    }
+    Ok(resp.json().await?)
+}
+
+async fn inoreader_session(
+    db: &Db,
+    http: &Client,
+    creds: &Creds,
+) -> AppResult<Session> {
+    let mut auth = creds
+        .auth
+        .clone()
         .ok_or_else(|| AppError::code("freshrssNotConnected"))?;
+    let expires_soon = creds
+        .token_expires_at
+        .is_some_and(|at| at <= now_secs() + 60);
+    if expires_soon {
+        let (Some(client_id), Some(client_secret), Some(refresh_token)) = (
+            creds.client_id.as_deref(),
+            creds.client_secret.as_deref(),
+            creds.refresh_token.as_deref(),
+        ) else {
+            return Err(AppError::code("inoreaderOauthFailed"));
+        };
+        let tokens = inoreader_refresh(http, client_id, client_secret, refresh_token).await?;
+        auth = tokens.access_token.clone();
+        let refresh = tokens
+            .refresh_token
+            .as_deref()
+            .unwrap_or(refresh_token);
+        persist_connection(
+            db,
+            INOREADER_BASE,
+            &creds.user,
+            &auth,
+            Provider::Inoreader,
+            Some(refresh),
+            Some(client_id),
+            Some(client_secret),
+            Some(now_secs() + tokens.expires_in.unwrap_or(3600)),
+        )
+        .await?;
+    }
+    session_with_token(http, INOREADER_BASE, auth, Provider::Inoreader).await
+}
+
+async fn sync_greader_now(db: &Db, http: &Client, creds: Creds) -> AppResult<usize> {
     let base = greader_base(&creds.url, creds.provider);
-    let session = match &creds.auth {
-        Some(auth) => session_with_token(http, &base, auth.clone()).await?,
-        None => {
-            // Legacy install: exchange the plaintext password for a token,
-            // then migrate so the password is no longer kept on disk.
-            let pass = creds.legacy_pass.as_deref().unwrap_or_default();
-            let session = login(http, &base, &creds.user, pass).await?;
-            persist_session(db, &creds.url, &creds.user, &session.auth, creds.provider).await?;
-            session
-        }
+    let session = match creds.provider {
+        Provider::Inoreader => inoreader_session(db, http, &creds).await?,
+        _ => match &creds.auth {
+            Some(auth) => session_with_token(http, &base, auth.clone(), creds.provider).await?,
+            None => {
+                let pass = creds.legacy_pass.as_deref().unwrap_or_default();
+                let session = login(http, &base, &creds.user, pass).await?;
+                persist_session(db, &creds.url, &creds.user, &session.auth, creds.provider).await?;
+                session
+            }
+        },
     };
 
-    // 1 ── push: flush queued local read/starred changes. `take_sync_queue`
-    // removes the rows up front, so any push that fails must be re-queued —
-    // otherwise a network blip silently drops the user's change forever.
     let queue = {
         let conn = db.lock().await;
         db::take_sync_queue(&conn)?
@@ -748,12 +874,7 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         };
         let action = if entry.value { "a" } else { "r" };
         let pushed = session
-            .post(http, "edit-tag")
-            .form(&[
-                ("i", entry.remote_id.as_str()),
-                (action, tag),
-                ("T", session.token.as_str()),
-            ])
+            .post_form(http, "edit-tag", vec![("i", entry.remote_id.as_str()), (action, tag)])
             .send()
             .await
             .and_then(|r| r.error_for_status())
@@ -770,21 +891,11 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         }
     }
 
-    // 1b ── push queued feed-/folder-level operations (unsubscribe, folder
-    // rename/delete, bulk mark-read). Draining before the pull means the
-    // subscription list read next already reflects them.
     push_ops(db, http, &session).await;
 
-    // 2 ── pull subscriptions: subscribe locally to any feed we don't have, and
-    // adopt the server's folder for a feed not yet filed here. Feeds with a
-    // pending unsubscribe are ignored so a delete that hasn't landed yet isn't
-    // undone by this pull.
     let (pending_unsubs, stale_folders): (HashSet<String>, HashSet<String>) = {
         let conn = db.lock().await;
         let subs = db::pending_op_targets(&conn, db::OP_UNSUBSCRIBE)?.into_iter().collect();
-        // A queued folder rename/delete leaves the old label live on the server;
-        // treat it as stale everywhere so the pull doesn't recreate it and the
-        // move-diff doesn't fight the queued op.
         let mut stale: HashSet<String> =
             db::pending_op_targets(&conn, db::OP_DELETE_FOLDER)?.into_iter().collect();
         stale.extend(db::pending_op_targets(&conn, db::OP_RENAME_FOLDER)?);
@@ -798,8 +909,6 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         .json()
         .await?;
 
-    // The server's view, used both for the local pull below and for the push
-    // diff: per-URL folder and title, skipping feeds being unsubscribed.
     let mut server = ServerSubs {
         urls: HashSet::new(),
         folder: HashMap::new(),
@@ -820,8 +929,6 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         if let Some(title) = &sub.title {
             server.title.insert(url.to_string(), title.clone());
         }
-        // `feed/<n>` → URL, so `unread-count` (keyed by the same id) can be
-        // joined back to a local feed.
         if let Some(id) = sub.id.as_deref().and_then(|i| i.strip_prefix("feed/")) {
             server.id_to_url.insert(id.to_string(), url.to_string());
         }
@@ -829,9 +936,6 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
     {
         let conn = db.lock().await;
         for sub in subs.subscriptions {
-            // Resolve the server-side folder (GReader "label") before moving
-            // `url` out of `sub`, mapping it onto a local folder by name. A
-            // stale (pending-rename/delete) label is ignored.
             let folder_id = sub
                 .categories
                 .iter()
@@ -851,9 +955,6 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
                     let st = parse::detect_source_type(&feed_url);
                     let _ = db::insert_feed(&conn, &feed_url, None, &title, None, st, folder_id);
                 }
-                // Reconcile the folder for a feed we already track, but only
-                // when it isn't filed locally yet — don't yank a feed the user
-                // has organised by hand back into the server's folder.
                 Some(id) => {
                     if let Some(folder_id) = folder_id {
                         if db::feed_folder_id(&conn, id)?.is_none() {
@@ -865,10 +966,6 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
         }
     }
 
-    // 2b ── push subscriptions: subscribe the server to any local feed it
-    // doesn't have, file each feed into its folder and push a hand-set title,
-    // so organising feeds in Papr propagates to the server instead of leaving
-    // the two sides to drift. Best-effort and idempotent.
     let local_feeds = {
         let conn = db.lock().await;
         db::feeds_for_sync(&conn)?
@@ -883,53 +980,799 @@ pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
     )
     .await;
 
-    // 2c ── pull the server's folder list so folders holding no feeds here yet
-    // still show up. Best-effort: skipped if the server has no `tag/list`.
     pull_folders(db, http, &session, &stale_folders).await;
-
-    // 2d ── pull the server's per-feed unread counts, making the sidebar and
-    // badge server-authoritative. Best-effort.
     pull_unread_counts(db, http, &session, &server.id_to_url).await;
 
-    // 3 ── reconcile read/starred state, treating the server as the source of
-    // truth. Papr polls each subscribed feed's raw RSS independently and marks
-    // every fetched item unread, so the local unread counts drift far above the
-    // server's. Rather than pull the (unbounded) full history, fetch just the
-    // server's *unread* and *starred* sets — both small — then mark every other
-    // synced article read. This is what a pure GReader client effectively does,
-    // and it fixes the runaway unread counts of issue #96 where the old
-    // "reconcile the most recent 1000 items" pass never reached the long tail.
     let unread = fetch_stream_items(&session, http, READING_LIST, Some(READ_TAG)).await?;
     let starred = fetch_stream_items(&session, http, STARRED_TAG, None).await?;
 
-    let unread_urls: std::collections::HashSet<String> =
-        unread.iter().map(|i| i.url.clone()).collect();
-    let starred_urls: std::collections::HashSet<String> =
-        starred.iter().map(|i| i.url.clone()).collect();
+    let unread_urls: HashSet<String> = unread.iter().map(|i| i.url.clone()).collect();
+    let starred_urls: HashSet<String> = starred.iter().map(|i| i.url.clone()).collect();
 
     let reconciled = {
         let conn = db.lock().await;
-        // Assign remote ids for the items we did fetch, so a later local edit on
-        // one of them has an id to push. (Read articles in the long tail carry
-        // no id until they next appear in an unread/starred response — pushing a
-        // change on those waits, exactly as before this change.)
         for item in unread.iter().chain(starred.iter()) {
             if let Some(aid) = db::article_id_by_url(&conn, &item.url)? {
                 db::set_remote_id(&conn, aid, &item.id)?;
             }
         }
-        // Scope the read/starred sweep to feeds the server actually knows about,
-        // so a local-only feed not yet mirrored server-side isn't wrongly marked
-        // all-read. Articles with an un-pushed local edit are left untouched.
         let server_feed_ids = db::feed_ids_by_urls(&conn, &server.urls)?;
         db::reconcile_sync_state(&conn, &server_feed_ids, &unread_urls, &starred_urls)?
     };
     Ok(reconciled)
 }
 
+// ─────────────────────────── Feedly flow ───────────────────────────
+
+struct FeedlySession {
+    base: String,
+    token: String,
+    user: String,
+}
+
+impl FeedlySession {
+    fn get(&self, http: &Client, path: &str) -> RequestBuilder {
+        http.get(format!("{}/v3/{path}", self.base))
+            .bearer_auth(&self.token)
+    }
+
+    fn post(&self, http: &Client, path: &str) -> RequestBuilder {
+        http.post(format!("{}/v3/{path}", self.base))
+            .bearer_auth(&self.token)
+    }
+
+    fn put(&self, http: &Client, path: &str) -> RequestBuilder {
+        http.put(format!("{}/v3/{path}", self.base))
+            .bearer_auth(&self.token)
+    }
+
+    fn delete(&self, http: &Client, path: &str) -> RequestBuilder {
+        http.delete(format!("{}/v3/{path}", self.base))
+            .bearer_auth(&self.token)
+    }
+}
+
+#[derive(Deserialize, Clone)]
+struct FeedlyProfile {
+    id: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct FeedlyCollection {
+    id: String,
+    label: String,
+    #[serde(default)]
+    feeds: Vec<FeedlyFeed>,
+}
+
+#[derive(Deserialize, Clone)]
+struct FeedlyFeed {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FeedlyStream {
+    #[serde(default)]
+    items: Vec<FeedlyItem>,
+    #[serde(default)]
+    continuation: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FeedlyItem {
+    id: String,
+    #[serde(default)]
+    canonical: Vec<Href>,
+    #[serde(default)]
+    alternate: Vec<Href>,
+}
+
+async fn feedly_profile(http: &Client, token: &str) -> AppResult<FeedlyProfile> {
+    let resp = http
+        .get(format!("{FEEDLY_BASE}/v3/profile"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(AppError::code("feedlyLoginFailed"));
+    }
+    Ok(resp.json().await?)
+}
+
+async fn feedly_collections(
+    session: &FeedlySession,
+    http: &Client,
+) -> AppResult<Vec<FeedlyCollection>> {
+    let resp = session.get(http, "collections").send().await?;
+    if !resp.status().is_success() {
+        return Err(AppError::code("feedlyLoginFailed"));
+    }
+    Ok(resp.json().await?)
+}
+
+fn feedly_collection_by_label<'a>(
+    collections: &'a [FeedlyCollection],
+    label: &str,
+) -> Option<&'a FeedlyCollection> {
+    collections
+        .iter()
+        .find(|c| c.label.eq_ignore_ascii_case(label))
+}
+
+async fn feedly_create_collection(
+    session: &FeedlySession,
+    http: &Client,
+    label: &str,
+) -> AppResult<FeedlyCollection> {
+    let resp = session
+        .post(http, "collections")
+        .json(&json!({ "label": label }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let value: Value = resp.json().await?;
+    let object = value
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .or_else(|| value.as_object().cloned().map(Value::Object))
+        .ok_or_else(|| AppError::code("feedlyLoginFailed"))?;
+    serde_json::from_value(object).map_err(|e| AppError::other(e.to_string()))
+}
+
+async fn feedly_ensure_collection(
+    session: &FeedlySession,
+    http: &Client,
+    collections: &mut Vec<FeedlyCollection>,
+    label: &str,
+) -> AppResult<String> {
+    if let Some(c) = feedly_collection_by_label(collections, label) {
+        return Ok(c.id.clone());
+    }
+    let created = feedly_create_collection(session, http, label).await?;
+    let id = created.id.clone();
+    collections.push(created);
+    Ok(id)
+}
+
+async fn feedly_mark_entries(
+    session: &FeedlySession,
+    http: &Client,
+    action: &str,
+    ids: &[String],
+) -> bool {
+    session
+        .post(http, "markers")
+        .json(&json!({
+            "type": "entries",
+            "action": action,
+            "entryIds": ids,
+        }))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .is_ok()
+}
+
+fn feedly_marker_action(field: &str, value: bool) -> &'static str {
+    match (field, value) {
+        ("starred", true) => "markAsSaved",
+        ("starred", false) => "markAsUnsaved",
+        (_, true) => "markAsRead",
+        (_, false) => "keepUnread",
+    }
+}
+
+async fn push_feedly_queue(db: &Db, http: &Client, session: &FeedlySession) {
+    let queue = {
+        let conn = db.lock().await;
+        match db::take_sync_queue(&conn) {
+            Ok(q) => q,
+            Err(e) => {
+                log::warn!("sync: could not read pending article changes: {e}");
+                return;
+            }
+        }
+    };
+    let mut groups: HashMap<(&'static str, bool), Vec<db::SyncEntry>> = HashMap::new();
+    for entry in queue {
+        groups
+            .entry((feedly_marker_action(&entry.field, entry.value), entry.value))
+            .or_default()
+            .push(entry);
+    }
+    for ((action, _), entries) in groups {
+        for chunk in entries.chunks(1000) {
+            let ids: Vec<String> = chunk.iter().map(|e| e.remote_id.clone()).collect();
+            if !feedly_mark_entries(session, http, action, &ids).await {
+                let conn = db.lock().await;
+                for entry in chunk {
+                    let _ = db::requeue_sync(&conn, entry.article_id, &entry.field, entry.value);
+                }
+            }
+        }
+    }
+}
+
+fn feedly_stream_target(
+    session: &FeedlySession,
+    target: &str,
+    collections: &[FeedlyCollection],
+) -> Option<(String, &'static str)> {
+    if target == READING_LIST {
+        return Some((format!("user/{}/category/global.all", session.user), "categories"));
+    }
+    if target == STARRED_TAG {
+        return None;
+    }
+    if let Some(name) = target.strip_prefix(LABEL_PREFIX) {
+        return feedly_collection_by_label(collections, name)
+            .map(|c| (c.id.clone(), "categories"));
+    }
+    if target.starts_with("feed/") {
+        return Some((target.to_string(), "feeds"));
+    }
+    None
+}
+
+async fn feedly_mark_stream(
+    session: &FeedlySession,
+    http: &Client,
+    target: &str,
+    collections: &[FeedlyCollection],
+    as_of: i64,
+) -> bool {
+    let Some((stream, kind)) = feedly_stream_target(session, target, collections) else {
+        return true;
+    };
+    let body = if kind == "feeds" {
+        json!({ "type": "feeds", "action": "markAsRead", "feedIds": [stream], "asOf": as_of })
+    } else {
+        json!({ "type": "categories", "action": "markAsRead", "categoryIds": [stream], "asOf": as_of })
+    };
+    session
+        .post(http, "markers")
+        .json(&body)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .is_ok()
+}
+
+async fn push_feedly_ops(
+    db: &Db,
+    http: &Client,
+    session: &FeedlySession,
+    collections: &[FeedlyCollection],
+) {
+    let ops = {
+        let conn = db.lock().await;
+        match db::list_ops(&conn) {
+            Ok(ops) => ops,
+            Err(e) => {
+                log::warn!("sync: could not read pending ops: {e}");
+                return;
+            }
+        }
+    };
+    for op in ops {
+        let ok = match op.kind.as_str() {
+            db::OP_UNSUBSCRIBE => {
+                let id = feedly_feed_id(&op.target);
+                session
+                    .delete(http, &format!("subscriptions/{}", encode_path(&id)))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND)
+                    .unwrap_or(false)
+            }
+            db::OP_RENAME_FOLDER => match feedly_collection_by_label(collections, &op.target) {
+                Some(collection) if !collection.id.is_empty() => session
+                    .post(http, "collections")
+                    .json(&json!({ "id": collection.id, "label": op.value.as_deref().unwrap_or_default() }))
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok(),
+                _ => true,
+            },
+            db::OP_DELETE_FOLDER => match feedly_collection_by_label(collections, &op.target) {
+                Some(collection) if !collection.id.is_empty() => session
+                    .delete(http, &format!("collections/{}", encode_path(&collection.id)))
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .is_ok(),
+                _ => true,
+            },
+            db::OP_MARK_ALL_READ => {
+                // The shared queue stores GReader's nanosecond cutoff; Feedly expects milliseconds.
+                let as_of = op.value.as_deref()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .map(|ts| ts / 1_000_000)
+                    .unwrap_or_else(|| now_secs() * 1000);
+                feedly_mark_stream(session, http, &op.target, collections, as_of).await
+            }
+            other => {
+                log::warn!("sync: dropping unknown op kind {other}");
+                true
+            }
+        };
+        if ok {
+            let conn = db.lock().await;
+            if let Err(e) = db::delete_op(&conn, op.id) {
+                log::warn!("sync: could not clear op #{}: {e}", op.id);
+            }
+        } else {
+            log::warn!("sync: op #{} ({}) failed, will retry", op.id, op.kind);
+        }
+    }
+}
+
+struct FeedlyServerSubs {
+    urls: HashSet<String>,
+    folder: HashMap<String, Option<String>>,
+    folder_id: HashMap<String, String>,
+    title: HashMap<String, String>,
+    id_to_url: HashMap<String, String>,
+}
+
+async fn push_feedly_subscriptions(
+    session: &FeedlySession,
+    http: &Client,
+    local: &[db::SyncFeed],
+    server: &FeedlyServerSubs,
+    collections: &mut Vec<FeedlyCollection>,
+    skip: &HashSet<String>,
+    stale_folders: &HashSet<String>,
+) {
+    for feed in local {
+        if skip.contains(&feed.url) {
+            continue;
+        }
+        let target_label = feed.folder.as_deref().unwrap_or(FEEDLY_UNFILED_LABEL);
+        if stale_folders.contains(target_label) {
+            continue;
+        }
+        let target_id = match feedly_ensure_collection(session, http, collections, target_label).await {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!("sync: could not prepare Feedly collection {target_label}: {e}");
+                continue;
+            }
+        };
+        let feed_id = feedly_feed_id(&feed.url);
+        let current_id = server.folder_id.get(&feed.url);
+        if !server.urls.contains(&feed.url) || current_id != Some(&target_id) {
+            if let Err(e) = session
+                .put(http, &format!("collections/{}/feeds", encode_path(&target_id)))
+                .json(&json!({ "id": feed_id, "title": feed.title }))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                log::warn!("sync: failed to add {} to Feedly collection: {e}", feed.url);
+                continue;
+            }
+            if let Some(old_id) = current_id.filter(|id| *id != &target_id) {
+                let _ = session
+                    .delete(http, &format!("collections/{}/feeds/.mdelete", encode_path(old_id)))
+                    .json(&json!([{ "id": feed_id }]))
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status());
+            }
+        } else if feed.custom_title {
+            if let Err(e) = session
+                .put(http, &format!("collections/{}/feeds", encode_path(&target_id)))
+                .json(&json!({ "id": feed_id, "title": feed.title }))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                log::warn!("sync: failed to rename Feedly feed {}: {e}", feed.url);
+            }
+        }
+    }
+}
+
+async fn fetch_feedly_items(
+    session: &FeedlySession,
+    http: &Client,
+    stream: &str,
+    unread_only: bool,
+) -> AppResult<Vec<RemoteItem>> {
+    const PAGE: &str = "1000";
+    const MAX_PAGES: usize = 30;
+    let mut out = Vec::new();
+    let mut continuation: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let mut params = vec![("streamId", stream), ("count", PAGE)];
+        if unread_only {
+            params.push(("unreadOnly", "true"));
+        }
+        if let Some(c) = continuation.as_deref() {
+            params.push(("continuation", c));
+        }
+        let page: FeedlyStream = session
+            .get(http, "streams/contents")
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        for item in page.items {
+            if let Some(url) = item
+                .canonical
+                .first()
+                .or_else(|| item.alternate.first())
+                .map(|h| h.href.clone())
+            {
+                out.push(RemoteItem { id: item.id, url });
+            }
+        }
+        match page.continuation {
+            Some(c) if !c.is_empty() => continuation = Some(c),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+async fn pull_feedly_unread_counts(
+    db: &Db,
+    http: &Client,
+    session: &FeedlySession,
+    id_to_url: &HashMap<String, String>,
+) {
+    let resp = match session.get(http, "markers/counts").send().await {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(resp) => {
+            log::warn!("sync: Feedly marker counts unavailable: {}", resp.status());
+            return;
+        }
+        Err(e) => {
+            log::warn!("sync: Feedly marker counts unavailable: {e}");
+            return;
+        }
+    };
+    let body: UnreadCounts = match resp.json().await {
+        Ok(body) => body,
+        Err(e) => {
+            log::warn!("sync: Feedly marker counts decode failed: {e}");
+            return;
+        }
+    };
+    let conn = db.lock().await;
+    let mut counts: HashMap<i64, i64> = HashMap::new();
+    for entry in &body.unreadcounts {
+        let Some(server_id) = entry.id.strip_prefix("feed/") else {
+            continue;
+        };
+        let Some(url) = id_to_url.get(server_id) else {
+            continue;
+        };
+        if let Ok(Some(feed_id)) = db::find_feed_by_url(&conn, url) {
+            counts.insert(feed_id, entry.count);
+        }
+    }
+    if let Err(e) = db::apply_server_unread(&conn, &counts) {
+        log::warn!("sync: could not cache Feedly unread counts: {e}");
+    }
+}
+
+async fn sync_feedly_now(db: &Db, http: &Client, creds: Creds) -> AppResult<usize> {
+    let auth = creds
+        .auth
+        .clone()
+        .ok_or_else(|| AppError::code("freshrssNotConnected"))?;
+    let session = FeedlySession {
+        base: feedly_base(&creds.url),
+        token: auth,
+        user: creds.user.clone(),
+    };
+
+    push_feedly_queue(db, http, &session).await;
+
+    let mut collections = feedly_collections(&session, http).await?;
+    push_feedly_ops(db, http, &session, &collections).await;
+    // Folder operations change collection IDs and labels used below.
+    collections = feedly_collections(&session, http).await?;
+
+    let (pending_unsubs, stale_folders): (HashSet<String>, HashSet<String>) = {
+        let conn = db.lock().await;
+        let subs = db::pending_op_targets(&conn, db::OP_UNSUBSCRIBE)?.into_iter().collect();
+        let mut stale: HashSet<String> =
+            db::pending_op_targets(&conn, db::OP_DELETE_FOLDER)?.into_iter().collect();
+        stale.extend(db::pending_op_targets(&conn, db::OP_RENAME_FOLDER)?);
+        (subs, stale)
+    };
+
+    let mut server = FeedlyServerSubs {
+        urls: HashSet::new(),
+        folder: HashMap::new(),
+        folder_id: HashMap::new(),
+        title: HashMap::new(),
+        id_to_url: HashMap::new(),
+    };
+    for collection in &collections {
+        let folder = if feedly_collection_is_unfiled(&collection.label) {
+            None
+        } else {
+            Some(collection.label.clone())
+        };
+        for feed in &collection.feeds {
+            let url = feedly_feed_url(&feed.id);
+            if pending_unsubs.contains(&url) || server.urls.contains(&url) {
+                continue;
+            }
+            server.urls.insert(url.clone());
+            server.folder.insert(url.clone(), folder.clone());
+            server.folder_id.insert(url.clone(), collection.id.clone());
+            if let Some(title) = &feed.title {
+                server.title.insert(url.clone(), title.clone());
+            }
+            server.id_to_url.insert(feedly_feed_url(&feed.id), url);
+        }
+    }
+
+    {
+        let conn = db.lock().await;
+        for collection in &collections {
+            let folder_id = if feedly_collection_is_unfiled(&collection.label) {
+                None
+            } else {
+                Some(db::folder_id_by_name(&conn, &collection.label)?)
+            };
+            for feed in &collection.feeds {
+                let feed_url = feedly_feed_url(&feed.id);
+                if pending_unsubs.contains(&feed_url) {
+                    continue;
+                }
+                match db::find_feed_by_url(&conn, &feed_url)? {
+                    None => {
+                        let title = feed.title.clone().unwrap_or_else(|| feed_url.clone());
+                        let st = parse::detect_source_type(&feed_url);
+                        let _ = db::insert_feed(&conn, &feed_url, None, &title, None, st, folder_id);
+                    }
+                    Some(id) => {
+                        if let Some(folder_id) = folder_id {
+                            if db::feed_folder_id(&conn, id)?.is_none() {
+                                db::move_feed(&conn, id, Some(folder_id))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let local_feeds = {
+        let conn = db.lock().await;
+        db::feeds_for_sync(&conn)?
+    };
+    push_feedly_subscriptions(
+        &session,
+        http,
+        &local_feeds,
+        &server,
+        &mut collections,
+        &pending_unsubs,
+        &stale_folders,
+    )
+    .await;
+
+    {
+        let conn = db.lock().await;
+        for collection in &collections {
+            if !feedly_collection_is_unfiled(&collection.label)
+                && !stale_folders.contains(&collection.label)
+            {
+                if let Err(e) = db::folder_id_by_name(&conn, &collection.label) {
+                    log::warn!("sync: could not create Feedly folder {}: {e}", collection.label);
+                }
+            }
+        }
+    }
+
+    pull_feedly_unread_counts(db, http, &session, &server.id_to_url).await;
+
+    let all_stream = format!("user/{}/category/global.all", session.user);
+    let saved_stream = format!("user/{}/tag/global.saved", session.user);
+    let unread = fetch_feedly_items(&session, http, &all_stream, true).await?;
+    let starred = fetch_feedly_items(&session, http, &saved_stream, false).await?;
+
+    let unread_urls: HashSet<String> = unread.iter().map(|i| i.url.clone()).collect();
+    let starred_urls: HashSet<String> = starred.iter().map(|i| i.url.clone()).collect();
+
+    let reconciled = {
+        let conn = db.lock().await;
+        for item in unread.iter().chain(starred.iter()) {
+            if let Some(aid) = db::article_id_by_url(&conn, &item.url)? {
+                db::set_remote_id(&conn, aid, &item.id)?;
+            }
+        }
+        let server_feed_ids = db::feed_ids_by_urls(&conn, &server.urls)?;
+        db::reconcile_sync_state(&conn, &server_feed_ids, &unread_urls, &starred_urls)?
+    };
+    Ok(reconciled)
+}
+
+pub async fn sync_now(db: &Db, http: &Client) -> AppResult<usize> {
+    let creds = creds(db)
+        .await?
+        .ok_or_else(|| AppError::code("freshrssNotConnected"))?;
+    match creds.provider {
+        Provider::Feedly => sync_feedly_now(db, http, creds).await,
+        _ => sync_greader_now(db, http, creds).await,
+    }
+}
+
+// ─────────────────────────── Inoreader OAuth ───────────────────────────
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct OAuthTokens {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
+    #[serde(default)]
+    pub token_type: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+pub fn inoreader_auth_url(client_id: &str, state: &str) -> String {
+    let mut url = url::Url::parse(&format!("{INOREADER_BASE}/oauth2/auth"))
+        .expect("Inoreader auth URL is valid");
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", INOREADER_REDIRECT_URI)
+        .append_pair("response_type", "code")
+        .append_pair("scope", "read write")
+        .append_pair("state", state);
+    url.to_string()
+}
+
+pub async fn exchange_inoreader_code(
+    http: &Client,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+) -> AppResult<OAuthTokens> {
+    let resp = http
+        .post(format!("{INOREADER_BASE}/oauth2/token"))
+        .form(&[
+            ("code", code),
+            ("redirect_uri", INOREADER_REDIRECT_URI),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("grant_type", "authorization_code"),
+        ])
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(AppError::code("inoreaderOauthFailed"));
+    }
+    Ok(resp.json().await?)
+}
+
+async fn inoreader_user_id(http: &Client, token: &str) -> AppResult<String> {
+    let resp = http
+        .get(format!("{INOREADER_BASE}/reader/api/0/user-info"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(AppError::code("inoreaderOauthFailed"));
+    }
+    let value: Value = resp.json().await?;
+    value
+        .get("userId")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .or_else(|| value.get("userProfileId").and_then(Value::as_str))
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::code("inoreaderOauthFailed"))
+}
+
+pub async fn finish_inoreader_oauth(
+    db: &Db,
+    http: &Client,
+    tokens: OAuthTokens,
+    client_id: &str,
+    client_secret: &str,
+) -> AppResult<()> {
+    let user = inoreader_user_id(http, &tokens.access_token).await?;
+    let expires_at = now_secs() + tokens.expires_in.unwrap_or(3600);
+    persist_connection(
+        db,
+        INOREADER_BASE,
+        &user,
+        &tokens.access_token,
+        Provider::Inoreader,
+        tokens.refresh_token.as_deref(),
+        Some(client_id),
+        Some(client_secret),
+        Some(expires_at),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mock_response(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end].lines().find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    }).unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (base, task)
+    }
+
+    #[tokio::test]
+    async fn feedly_mark_all_read_sends_millisecond_cutoff() {
+        let (base, request) = mock_response("200 OK", "{}").await;
+        let session = FeedlySession { base, token: "test-token".into(), user: "u1".into() };
+        let db = Mutex::new(db::open(std::path::Path::new(":memory:")).unwrap());
+        {
+            let conn = db.lock().await;
+            db::enqueue_op(&conn, db::OP_MARK_ALL_READ, READING_LIST, Some("1700000000000000000")).unwrap();
+        }
+        push_feedly_ops(&db, &Client::new(), &session, &[]).await;
+        assert!(db::list_ops(&*db.lock().await).unwrap().is_empty());
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /v3/markers "));
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer test-token"));
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["asOf"], 1_700_000_000_000_i64);
+        assert_eq!(body["categoryIds"], json!(["user/u1/category/global.all"]));
+    }
+
+    #[tokio::test]
+    async fn feedly_sync_stops_when_collections_cannot_be_loaded() {
+        let (base, request) = mock_response("503 Service Unavailable", "{}").await;
+        let db = Mutex::new(db::open(std::path::Path::new(":memory:")).unwrap());
+        let creds = Creds {
+            url: base, user: "u1".into(), auth: Some("test-token".into()),
+            legacy_pass: None, provider: Provider::Feedly, refresh_token: None,
+            client_id: None, client_secret: None, token_expires_at: None,
+        };
+        assert!(sync_feedly_now(&db, &Client::new(), creds).await.is_err());
+        assert!(request.await.unwrap().starts_with("GET /v3/collections "));
+    }
 
     fn cat(id: &str, label: Option<&str>) -> SubCat {
         SubCat {
@@ -948,7 +1791,6 @@ mod tests {
 
     #[test]
     fn folder_name_falls_back_to_label_id() {
-        // Some servers omit the human label; derive it from the id instead.
         assert_eq!(
             cat("user/-/label/科技", None).folder_name().as_deref(),
             Some("科技")
@@ -957,15 +1799,12 @@ mod tests {
 
     #[test]
     fn folder_name_skips_unnamed_categories() {
-        // A state tag (not a label) or a blank label is not a folder.
         assert_eq!(cat("user/-/state/com.google/read", None).folder_name(), None);
         assert_eq!(cat("", Some("   ")).folder_name(), None);
     }
 
     #[test]
     fn folder_name_skips_freshrss_uncategorized() {
-        // FreshRSS's built-in "Uncategorized" label is not a real folder, by
-        // either label or id, and regardless of case.
         assert_eq!(
             cat("user/-/label/Uncategorized", Some("Uncategorized")).folder_name(),
             None
@@ -981,8 +1820,6 @@ mod tests {
 
     #[test]
     fn folder_change_adds_new_label_local_wins() {
-        // A feed the user filed by hand is pushed even when the server had it
-        // elsewhere or unfiled; a folder change clears the stale server label.
         assert_eq!(
             folder_change(Some("Tech"), Some("News")),
             Some((Some(label_stream("Tech")), Some(label_stream("News"))))
@@ -997,15 +1834,90 @@ mod tests {
     fn tag_folder_name_only_accepts_labels() {
         let folder = Tag { id: label_stream("Tech"), kind: Some("folder".into()) };
         assert_eq!(folder.folder_name().as_deref(), Some("Tech"));
-
-        // A FreshRSS article tag (type "tag") is not a folder.
         let article_tag = Tag { id: label_stream("Later"), kind: Some("tag".into()) };
         assert_eq!(article_tag.folder_name(), None);
-
-        // System state tags and the built-in bucket are skipped.
         let state = Tag { id: READ_TAG.into(), kind: None };
         assert_eq!(state.folder_name(), None);
         let uncat = Tag { id: label_stream("Uncategorized"), kind: Some("folder".into()) };
         assert_eq!(uncat.folder_name(), None);
+    }
+
+    #[test]
+    fn provider_setting_round_trips_all_services() {
+        for (raw, expected) in [
+            ("freshrss", Provider::FreshRss),
+            ("miniflux", Provider::Miniflux),
+            ("inoreader", Provider::Inoreader),
+            ("feedly", Provider::Feedly),
+            ("unknown", Provider::FreshRss),
+        ] {
+            assert_eq!(Provider::from_setting(Some(raw)), expected);
+            assert_eq!(Provider::from_setting(Some(expected.as_str())), expected);
+        }
+    }
+
+    #[test]
+    fn greader_base_is_idempotent() {
+        assert_eq!(
+            greader_base("https://rss.example", Provider::FreshRss),
+            "https://rss.example/api/greader.php"
+        );
+        assert_eq!(
+            greader_base("https://rss.example/api/greader.php/", Provider::FreshRss),
+            "https://rss.example/api/greader.php"
+        );
+        assert_eq!(greader_base("https://rss.example", Provider::Miniflux), "https://rss.example");
+        assert_eq!(greader_base("ignored", Provider::Inoreader), INOREADER_BASE);
+    }
+
+    #[test]
+    fn feedly_feed_ids_map_to_urls() {
+        let url = "https://example.com/feed.xml";
+        assert_eq!(feedly_feed_id(url), "feed/https://example.com/feed.xml");
+        assert_eq!(feedly_feed_url("feed/https://example.com/feed.xml"), url);
+        assert_eq!(feedly_feed_url("https://example.com/feed.xml"), url);
+    }
+
+    #[test]
+    fn feedly_marker_actions_cover_read_and_saved_state() {
+        assert_eq!(feedly_marker_action("read", true), "markAsRead");
+        assert_eq!(feedly_marker_action("read", false), "keepUnread");
+        assert_eq!(feedly_marker_action("starred", true), "markAsSaved");
+        assert_eq!(feedly_marker_action("starred", false), "markAsUnsaved");
+    }
+
+    #[test]
+    fn feedly_stream_target_maps_global_and_feed_streams() {
+        let session = FeedlySession {
+            base: FEEDLY_BASE.into(),
+            token: "token".into(),
+            user: "user-1".into(),
+        };
+        let collections = vec![FeedlyCollection {
+            id: "user/user-1/category/Tech".into(),
+            label: "Tech".into(),
+            feeds: Vec::new(),
+        }];
+        assert_eq!(
+            feedly_stream_target(&session, READING_LIST, &collections),
+            Some(("user/user-1/category/global.all".into(), "categories"))
+        );
+        assert_eq!(
+            feedly_stream_target(&session, &label_stream("Tech"), &collections),
+            Some(("user/user-1/category/Tech".into(), "categories"))
+        );
+        assert_eq!(
+            feedly_stream_target(&session, "feed/https://example.com/rss", &collections),
+            Some(("feed/https://example.com/rss".into(), "feeds"))
+        );
+    }
+
+    #[test]
+    fn inoreader_auth_url_encodes_redirect_and_scope() {
+        let url = inoreader_auth_url("client 1", "state-1");
+        assert!(url.contains("client_id=client+1"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A19812%2Foauth%2Fcallback"));
+        assert!(url.contains("scope=read+write"));
+        assert!(url.contains("state=state-1"));
     }
 }

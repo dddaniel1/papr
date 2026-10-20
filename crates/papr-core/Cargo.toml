@@ -29,3 +29,5 @@ lol_html.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tempfile = "3"
+pulldown-cmark = { version = "0.13", default-features = false }

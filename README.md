@@ -30,9 +30,28 @@ the CLI can never drift apart.
 - **Full-text** — fetch and clean the complete article when a feed ships only a summary.
 - **AI** — summaries, questions across your feeds, and recent-article briefings. Bring your own API key.
 - **Audio** — a built-in player that follows you from article to article.
-- **FreshRSS sync** — keep read state, subscriptions and folders in step with a FreshRSS or Miniflux server.
-- **Local-first** — everything stays on your machine. No account, no cloud.
+- **Third-party services** — sync read state, subscriptions and folders with FreshRSS, Miniflux, Inoreader or Feedly; manually archive articles, highlights and notes to Obsidian or Notion.
+- **Local-first** — your library stays on your machine; external sync and archiving are optional.
 - **Localized** — English, Japanese, and Simplified Chinese.
+
+### Feed sync
+
+Open **Settings → Third-party services** and connect one sync service:
+
+- **FreshRSS / Miniflux:** enter the server URL, username and password (Miniflux uses its Google Reader application password).
+- **Inoreader:** enter your own OAuth app's client ID and secret, register `http://127.0.0.1:19812/oauth/callback` as its exact redirect URI, then authorize in your browser. Papr refreshes OAuth access tokens automatically.
+- **Feedly:** enter a personal API access token with permission to read and update your account. API access depends on your Feedly account's permissions. Replace the token when it expires.
+
+Subscriptions, folders, read and starred states sync in both directions. Local feeds without a folder use a **Papr** collection in Feedly. Disconnect before switching services; local articles stay in Papr, while the previous service's remote IDs and queued edits are cleared.
+
+### Article archiving
+
+Open **Settings → Third-party services** to configure either destination:
+
+- **Obsidian:** choose an existing local vault and an optional folder within it.
+- **Notion:** enter an internal integration token and a parent page or database URL/ID. Give the integration read, insert and update content permissions, and share the destination with it. Database destinations currently require a single data source. Matching URL, Feed and Published properties are populated when their types are supported; all article metadata is also included in the page body.
+
+Each configured service gets its own reader toolbar button. Saving exports the stored article body (preferring extracted full text), original image URLs, highlights and notes. If a feed only provides a summary, extract the full article before saving. Saving again updates the same file or page and overwrites edits in that exported copy. This is a manual, one-way archive; it does not import changes back into Papr or download image files.
 
 ### Install
 
@@ -56,7 +75,7 @@ work your feeds with no GUI:
 - **Read** — `feeds`, `list`, `read`, full-text `search`
 - **Triage** — `mark` read/star/later, `extract` full text, `refresh`
 - **Manage** — subscriptions, folders, tags, rules, highlights, OPML
-- **Sync** — FreshRSS / Miniflux
+- **Sync** — FreshRSS / Miniflux / Inoreader / Feedly
 
 Run bare `papr` and it prints your unread dashboard *plus the next useful
 commands*, so the agent orients with zero manual. Output is
