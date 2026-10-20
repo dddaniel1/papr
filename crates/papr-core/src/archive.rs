@@ -161,6 +161,26 @@ pub fn obsidian_destination(vault: &str, folder: &str) -> AppResult<String> {
         .to_string_lossy()
         .into_owned())
 }
+pub fn obsidian_filename(article: &ArticleDetail) -> String {
+    let mut title = String::new();
+    for c in article.title.trim().chars() {
+        let c = if c.is_control() || "<>:\"/\\|?*[]#^".contains(c) { '_' } else { c };
+        if title.len() + c.len_utf8() > 200 {
+            break;
+        }
+        title.push(c);
+    }
+    let title = title.trim_matches([' ', '.']);
+    if title.is_empty() {
+        return format!("papr-article-{}.md", article.id);
+    }
+    // Windows reserves these names even when followed by a file extension.
+    let stem = title.split('.').next().unwrap().to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    format!("{}{title}.md", if reserved { "_" } else { "" })
+}
 pub fn write_obsidian(
     vault: &str,
     folder: &str,
@@ -171,7 +191,7 @@ pub fn write_obsidian(
     let directory = obsidian_directory(vault, folder, true)?;
     let filename = previous
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("papr-article-{}.md", article.id));
+        .unwrap_or_else(|| obsidian_filename(article));
     if Path::new(&filename).components().count() != 1
         || !matches!(
             Path::new(&filename).components().next(),
@@ -1014,6 +1034,22 @@ mod tests {
         assert!(exported.contains(r"Note \*\*literal\*\*"));
     }
     #[test]
+    fn obsidian_filenames_use_safe_article_titles() {
+        let mut article = article();
+        for (title, expected) in [
+            ("文章的名字", "文章的名字.md"),
+            ("  A title. ", "A title.md"),
+            ("../A/B\\C: D?", "_A_B_C_ D_.md"),
+            ("...", "papr-article-42.md"),
+            ("CON", "_CON.md"),
+        ] {
+            article.title = title.into();
+            assert_eq!(obsidian_filename(&article), expected);
+        }
+        article.title = "文".repeat(200);
+        assert!(obsidian_filename(&article).len() <= 203);
+    }
+    #[test]
     fn safe_vault_paths_and_stable_atomic_overwrite() {
         let vault = tempfile::tempdir().unwrap();
         let vault_path = vault.path().to_str().unwrap();
@@ -1027,6 +1063,7 @@ mod tests {
             assert!(obsidian_directory(vault_path, path, true).is_err());
         }
         let first = write_obsidian(vault_path, "Articles", &article(), &[], None).unwrap();
+        assert!(first.ends_with("A _title_.md"));
         assert!(write_obsidian(vault_path, "Articles", &article(), &[], None).is_err());
         let mut renamed = article();
         renamed.title = "Renamed".into();
@@ -1035,7 +1072,7 @@ mod tests {
             "Articles",
             &renamed,
             &[],
-            Some("papr-article-42.md"),
+            Some("A _title_.md"),
         )
         .unwrap();
         assert_eq!(first, second);
@@ -1078,7 +1115,7 @@ mod tests {
         assert!(obsidian_directory(root, "alias", false).is_ok());
         let victim = outside.path().join("victim");
         std::fs::write(&victim, "keep").unwrap();
-        symlink(&victim, vault.path().join("papr-article-42.md")).unwrap();
+        symlink(&victim, vault.path().join(obsidian_filename(&article()))).unwrap();
         assert!(write_obsidian(root, "", &article(), &[], None).is_err());
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep");
     }
@@ -1098,6 +1135,7 @@ mod tests {
         assert!(notion_id("abc").is_err());
         let schema = json!({"Name":{"type":"title"},"Source URL":{"type":"url"},"Feed":{"type":"rich_text"},"Published":{"type":"date"},"URL":{"type":"rich_text"},"Other":{"type":"number"}});
         let props = page_properties(&schema, &article()).unwrap();
+        assert_eq!(props["Name"]["title"][0]["text"]["content"], article().title);
         assert_eq!(props["Source URL"]["url"], "https://example.com/article");
         assert!(props.get("URL").is_none());
         assert!(props.get("Other").is_none());
@@ -1304,6 +1342,16 @@ mod tests {
             [],
         )
         .unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let destination = vault.path().to_str().unwrap();
+        std::fs::write(vault.path().join("Title.md"), "Keep this file").unwrap();
+        let filename = db::reserve_obsidian_archive(&conn, 42, destination, "Title.md").unwrap();
+        assert_eq!(filename, "Title (42-1).md");
+        assert_eq!(db::reserve_obsidian_archive(&conn, 42, destination, "Renamed.md").unwrap(), filename);
+        assert_eq!(std::fs::read_to_string(vault.path().join("Title.md")).unwrap(), "Keep this file");
+        conn.execute("INSERT INTO articles(id,feed_id,guid,title) VALUES(43,1,'guid-2','Title')", []).unwrap();
+        let second = db::reserve_obsidian_archive(&conn, 43, destination, &filename).unwrap();
+        assert_ne!(second, filename);
         let config = NotionConfig::load(
             &conn,
             Some("secret-token"),

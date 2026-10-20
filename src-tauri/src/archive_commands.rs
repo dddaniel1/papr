@@ -130,6 +130,7 @@ pub async fn archive_article(
                 &*state.db.lock().await,
                 article_id,
                 &destination,
+                &archive::obsidian_filename(&article),
             )?);
             let location = tokio::task::spawn_blocking(move || {
                 archive::write_obsidian(&vault, &folder, &article, &highlights, previous.as_deref())

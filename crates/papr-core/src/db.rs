@@ -2406,9 +2406,27 @@ pub fn save_archive_location(conn: &Connection, article_id: i64, service: &str, 
     Ok(())
 }
 
-pub fn reserve_obsidian_archive(conn: &Connection, article_id: i64, destination: &str) -> AppResult<String> {
-    conn.execute("INSERT OR IGNORE INTO article_archives VALUES (?1, 'obsidian', ?2, 'papr-' || lower(hex(randomblob(16))) || '.md')",
-        params![article_id, destination])?;
+pub fn reserve_obsidian_archive(conn: &Connection, article_id: i64, destination: &str, filename: &str) -> AppResult<String> {
+    if let Some(previous) = archive_location(conn, article_id, "obsidian", destination)? {
+        return Ok(previous);
+    }
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    let mut candidate = filename.to_string();
+    let mut suffix = 1;
+    loop {
+        let reserved: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM article_archives WHERE service='obsidian' AND destination=?1 AND lower(location)=lower(?2))",
+            params![destination, candidate], |r| r.get(0))?;
+        match std::fs::symlink_metadata(std::path::Path::new(destination).join(&candidate)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !reserved => break,
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(AppError::other(format!("Could not check archive filename: {e}"))),
+            _ => {}
+        }
+        candidate = format!("{stem} ({article_id}-{suffix}).md");
+        suffix += 1;
+    }
+    conn.execute("INSERT OR IGNORE INTO article_archives VALUES (?1, 'obsidian', ?2, ?3)",
+        params![article_id, destination, candidate])?;
     archive_location(conn, article_id, "obsidian", destination)?.ok_or_else(|| AppError::other("Could not reserve archive destination"))
 }
 

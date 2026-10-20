@@ -48,7 +48,7 @@ Subscriptions, folders, read and starred states sync in both directions. Local f
 
 Open **Settings → Third-party services** to configure either destination:
 
-- **Obsidian:** choose an existing local vault and an optional folder within it.
+- **Obsidian:** choose an existing local vault and an optional folder within it. New files use the article title, with unsafe filename characters replaced and a suffix added for duplicates. Existing archives keep their saved filenames.
 - **Notion:** enter an internal integration token and a parent page or database URL/ID. Give the integration read, insert and update content permissions, and share the destination with it. Database destinations currently require a single data source. Matching URL, Feed and Published properties are populated when their types are supported; all article metadata is also included in the page body.
 
 Each configured service gets its own reader toolbar button. Saving exports the stored article body (preferring extracted full text), original image URLs, highlights and notes. If a feed only provides a summary, extract the full article before saving. Saving again updates the same file or page and overwrites edits in that exported copy. This is a manual, one-way archive; it does not import changes back into Papr or download image files.
