@@ -120,6 +120,7 @@
     "refreshSyncFailed": "Feeds refreshed, but sync failed: {{error}}"
   },
   "articleList": {
+    "openImage": "View image {{index}} of {{count}}",
     "markedReadToast": "Marked {{count}} articles as read",
     "nothingToMark": "No articles to mark",
     "menuOpen": "Open",
@@ -223,6 +224,7 @@
     "translateTitle": "Translate to",
     "translateEngine": "Engine",
     "translateEngineLlm": "AI model",
+    "imageViewer": "Image viewer",
     "lightboxClose": "Close",
     "lightboxPrev": "Previous image",
     "lightboxNext": "Next image",
@@ -310,6 +312,7 @@
       "listStyle": "Article list style",
       "listStyleList": "List",
       "listStyleCard": "Card",
+      "listStyleTimeline": "Timeline",
       "details": "Details",
       "sidebarCounts": "Show unread counts in sidebar",
       "cardThumbs": "Show thumbnails on article cards",

@@ -660,6 +660,7 @@ function AppearanceSection() {
             options={[
               { value: "list", label: t("settings.appearance.listStyleList") },
               { value: "card", label: t("settings.appearance.listStyleCard") },
+              { value: "timeline", label: t("settings.appearance.listStyleTimeline") },
             ]}
             onChange={setViewMode}
           />

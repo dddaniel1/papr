@@ -920,6 +920,93 @@ button { font-family: inherit; }
   overflow: hidden;
 }
 
+/* Social timeline: source avatar, expanded preview, media and quick actions. */
+.art.timeline {
+  padding-left: calc(var(--list-px) + 44px);
+}
+.timeline-avatar {
+  position: absolute;
+  left: var(--list-px);
+  top: var(--row-py);
+}
+.art.timeline .art-head { gap: 6px; }
+.art.timeline .art-feed { font-weight: 650; color: var(--ink); }
+.art.timeline .art-title {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-bottom: 6px;
+}
+.art.timeline .art-snippet {
+  display: block;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.timeline-author {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.timeline-media {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  width: 100%;
+  aspect-ratio: 1.38;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 12px;
+  background: var(--hair);
+}
+.timeline-media[data-count="1"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  aspect-ratio: 16 / 9;
+}
+.timeline-media[data-count="2"] { grid-template-rows: minmax(0, 1fr); }
+.timeline-media[data-count="3"] .timeline-media-tile:first-child { grid-row: span 2; }
+.timeline-media-tile { position: relative; min-height: 0; overflow: hidden; }
+.timeline-media-tile > img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.timeline-media-open {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+.timeline-media-open:hover { background: rgba(0, 0, 0, 0.08); }
+.timeline-media-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.timeline-media-more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.48);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 600;
+}
+.timeline-media .image-failure {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  min-height: 0;
+  padding: 8px;
+  overflow: auto;
+}
+.timeline-actions {
+  display: flex;
+  justify-content: space-between;
+  margin: 10px -6px -6px;
+  max-width: 240px;
+}
+.timeline-actions .tb-btn[aria-pressed="true"] { color: var(--accent-ink); }
+.art.timeline:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 /* ====== Reader ====== */
 .reader {
   background: var(--reader);

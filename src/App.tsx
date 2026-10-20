@@ -420,6 +420,7 @@ export default function App() {
   // ── global keyboard shortcuts (design app.jsx parity) ──
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector(".lightbox")) return;
       const tag = (e.target as HTMLElement)?.tagName;
       const inField = tag === "INPUT" || tag === "TEXTAREA";
       const mod = e.metaKey || e.ctrlKey;

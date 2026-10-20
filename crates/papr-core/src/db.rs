@@ -1389,7 +1389,7 @@ pub fn list_articles(
     let mut sql = format!(
         "SELECT a.id, a.feed_id, f.title, f.source_type, a.title, a.author,
                 substr(a.body_text,1,{snippet_len}), a.image_url, a.url, a.published_at,
-                a.is_read, a.is_starred, a.read_later
+                a.is_read, a.is_starred, a.read_later, a.content_html, a.extracted_html
          FROM articles a JOIN feeds f ON f.id = a.feed_id ",
         snippet_len = PREVIEW_SNIPPET_CHARS,
     );
@@ -1424,6 +1424,18 @@ pub fn list_articles(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params_from_iter(binds), |r| {
+            let mut image_urls = crate::sanitize::image_urls(
+                r.get::<_, Option<String>>(13)?.as_deref().unwrap_or(""),
+            );
+            if image_urls.is_empty() {
+                image_urls = crate::sanitize::image_urls(
+                    r.get::<_, Option<String>>(14)?.as_deref().unwrap_or(""),
+                );
+            }
+            let image_url: Option<String> = r.get(7)?;
+            if let Some(cover) = image_url.as_ref().filter(|cover| !image_urls.contains(cover)) {
+                image_urls.insert(0, cover.clone());
+            }
             Ok(ArticleSummary {
                 id: r.get(0)?,
                 feed_id: r.get(1)?,
@@ -1432,7 +1444,8 @@ pub fn list_articles(
                 title: r.get(4)?,
                 author: r.get(5)?,
                 snippet: r.get(6)?,
-                image_url: r.get(7)?,
+                image_url,
+                image_urls,
                 url: r.get(8)?,
                 published_at: r.get(9)?,
                 is_read: r.get(10)?,
@@ -2990,6 +3003,18 @@ mod tests {
             .query_row("SELECT id FROM articles", [], |r| r.get(0))
             .unwrap();
         (conn, article_id)
+    }
+
+    #[test]
+    fn list_gallery_images_include_existing_bodies_and_extracted_fallback() {
+        let (conn, id) = test_db();
+        conn.execute("UPDATE articles SET image_url = 'https://ex.com/a.jpg', content_html = ?2 WHERE id = ?1", params![id, "<img src='https://ex.com/a.jpg'><img src='https://ex.com/b.jpg'>"]).unwrap();
+        let read = || list_articles(&conn, &ArticleQuery::All, false, None, false, 60, 0).unwrap().remove(0);
+        assert_eq!(read().image_urls, vec!["https://ex.com/a.jpg", "https://ex.com/b.jpg"]);
+        conn.execute("UPDATE articles SET content_html = NULL, extracted_html = ?2 WHERE id = ?1", params![id, "<img src='https://ex.com/c.jpg'>"]).unwrap();
+        assert_eq!(read().image_urls, vec!["https://ex.com/a.jpg", "https://ex.com/c.jpg"]);
+        conn.execute("UPDATE articles SET extracted_html = NULL WHERE id = ?1", [id]).unwrap();
+        assert_eq!(read().image_urls, vec!["https://ex.com/a.jpg"]);
     }
 
     #[test]

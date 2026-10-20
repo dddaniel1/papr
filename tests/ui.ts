@@ -11,10 +11,15 @@ const feed: Feed = {
 const articles: ArticleSummary[] = Array.from({ length: 120 }, (_, i) => ({
   id: i + 1, feedId: 1, feedTitle: feed.title, sourceType: "rss", title: `Article ${i + 1}`,
   author: null, snippet: "A reading preview that stays readable after marking this article read.",
-  imageUrl: null, url: null, publishedAt: "2026-10-17T00:00:00Z", isRead: false,
+  imageUrl: null, imageUrls: [], url: null, publishedAt: "2026-10-17T00:00:00Z", isRead: false,
   isStarred: false, readLater: false,
 }));
 articles[2] = { ...articles[2], title: "RSSHub Bilibili video", url: "https://www.bilibili.com/video/BV1xx411c7mD?p=2", imageUrl: "https://example.test/bilibili-cover.jpg" };
+const galleryImages = Array.from({ length: 6 }, (_, i) =>
+  "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="320" height="200" fill="hsl(${i * 55} 45% 65%)"/><text x="160" y="110" text-anchor="middle" font-size="40">${i + 1}</text></svg>`));
+for (const [index, count] of [[3, 6], [4, 2], [5, 3], [6, 4]]) {
+  articles[index] = { ...articles[index], imageUrls: galleryImages.slice(0, count) };
+}
 const state = {
   feeds: [] as Feed[], articles: [] as ArticleSummary[], settings: new Map<string, string>(),
   highlights: [] as Highlight[], savedFile: null as null | { content: string; defaultName: string; extensions: string[] },
@@ -72,6 +77,7 @@ mockIPC(async (cmd, args: any = {}) => {
 localStorage.setItem("language", "en");
 localStorage.setItem("pref.markReadOnOpen", "0");
 localStorage.setItem("palette", "paper");
+localStorage.setItem("viewMode", "card");
 localStorage.setItem("mode", "light");
 await import("../src/main");
 const { useUi } = await import("../src/store");
@@ -160,6 +166,52 @@ async function runChecks() {
   click(".list-page-status .empty-retry");
   await waitFor(() => !document.body.textContent!.includes("Could not load more articles"), "pagination recovery");
   checks.push("Pagination error is visible and retry recovers");
+
+  useUi.getState().setViewMode("timeline");
+  useUi.getState().openArticle(1);
+  await waitFor(() => !!document.querySelector("#option-article-1.timeline .timeline-avatar"), "social timeline");
+  if (localStorage.getItem("viewMode") !== "timeline") throw new Error("Timeline preference was not saved");
+  if (document.querySelector(".timeline-day")) throw new Error("Social timeline has calendar groups");
+  if (document.querySelectorAll("#option-article-1 .timeline-actions button").length !== 3) throw new Error("Timeline actions missing");
+  click("#option-article-2 .timeline-actions button");
+  if (useUi.getState().selectedArticleId !== 1) throw new Error("Timeline action opened the article");
+  for (const [id, count] of [[4, 4], [5, 2], [6, 3], [7, 4]]) {
+    const media = document.querySelector(`#option-article-${id} .timeline-media`)!;
+    if (media?.children.length !== count) throw new Error(`Wrong gallery layout for article ${id}`);
+  }
+  if (document.querySelector("#option-article-4 .timeline-media-more")?.textContent !== "+2") throw new Error("Hidden image count missing");
+  await waitFor(() => !!document.querySelector("#option-article-3 .timeline-media .image-failure-message"), "failed timeline image");
+  click("#option-article-3 .timeline-media .image-failure-message");
+  if (useUi.getState().selectedArticleId !== 1) throw new Error("Image failure message opened the article");
+  const imageButton = document.querySelector<HTMLButtonElement>("#option-article-4 .timeline-media-tile:nth-child(4) button")!;
+  imageButton.focus();
+  imageButton.click();
+  await waitFor(() => document.querySelector(".lightbox-counter")?.textContent === "4 / 6", "gallery lightbox");
+  if (useUi.getState().selectedArticleId !== 1) throw new Error("Gallery click opened the article");
+  if (!document.querySelector(".lightbox")?.contains(document.activeElement)) throw new Error("Lightbox did not take focus");
+  const nextImageKey = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });
+  window.dispatchEvent(nextImageKey);
+  if (!nextImageKey.defaultPrevented) throw new Error("Lightbox arrow key can scroll the background");
+  await waitFor(() => document.querySelector(".lightbox-counter")?.textContent === "5 / 6", "fifth gallery image");
+  await waitFor(() => document.querySelector<HTMLImageElement>(".lightbox-img")?.naturalWidth === 320, "hidden gallery image decoded");
+  key("ArrowRight");
+  await waitFor(() => document.querySelector(".lightbox-counter")?.textContent === "6 / 6", "sixth gallery image");
+  key("j");
+  if (useUi.getState().selectedArticleId !== 1) throw new Error("Lightbox leaked navigation shortcut");
+  key("Escape");
+  await waitFor(() => !document.querySelector(".lightbox"), "lightbox closed");
+  if (document.activeElement !== imageButton) throw new Error("Lightbox did not restore focus");
+  checks.push("Multi-image grids, overflow count, all-image navigation and modal focus work");
+  const timelineList = document.querySelector('.list-scroll [role="list"]')!;
+  timelineList.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  await waitFor(() => document.querySelector("#option-article-2")?.getAttribute("aria-current") === "true", "timeline keyboard navigation");
+  useUi.getState().openArticle(61);
+  await waitFor(() => !!document.querySelector("#option-article-61"), "timeline second page");
+  if (!document.querySelector("#option-article-61 .timeline-avatar")) throw new Error("Timeline avatar missing on next page");
+  useUi.getState().setViewMode("list");
+  await waitFor(() => !document.querySelector(".art.timeline"), "return to list");
+  useUi.getState().setViewMode("card");
+  checks.push("Social timeline renders avatars and actions, pages, saves its preference and supports keyboard navigation");
 
   useUi.getState().openArticle(1);
   await waitFor(() => !!document.querySelector('button[aria-label="Export highlights and notes as Markdown"]'), "reader loaded");

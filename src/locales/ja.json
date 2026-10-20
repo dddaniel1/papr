@@ -120,6 +120,7 @@
     "refreshSyncFailed": "フィードの更新は完了しましたが、同期に失敗しました：{{error}}"
   },
   "articleList": {
+    "openImage": "画像 {{index}} / {{count}} を表示",
     "markedReadToast": "{{count}} 件を既読にしました",
     "nothingToMark": "マークする記事はありません",
     "menuOpen": "開く",
@@ -223,6 +224,7 @@
     "translateTitle": "翻訳先",
     "translateEngine": "エンジン",
     "translateEngineLlm": "AI モデル",
+    "imageViewer": "画像ビューアー",
     "lightboxClose": "閉じる",
     "lightboxPrev": "前の画像",
     "lightboxNext": "次の画像",
@@ -310,6 +312,7 @@
       "listStyle": "記事リストのスタイル",
       "listStyleList": "リスト",
       "listStyleCard": "カード",
+      "listStyleTimeline": "タイムライン",
       "details": "詳細",
       "sidebarCounts": "サイドバーに未読数を表示",
       "cardThumbs": "記事カードにサムネイルを表示",

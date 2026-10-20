@@ -120,6 +120,7 @@
     "refreshSyncFailed": "订阅源刷新完成，但同步失败：{{error}}"
   },
   "articleList": {
+    "openImage": "查看第 {{index}} 张图片，共 {{count}} 张",
     "markedReadToast": "已将 {{count}} 篇标为已读",
     "nothingToMark": "没有需要标记的文章",
     "menuOpen": "打开",
@@ -223,6 +224,7 @@
     "translateTitle": "翻译为",
     "translateEngine": "引擎",
     "translateEngineLlm": "AI 模型",
+    "imageViewer": "图片浏览",
     "lightboxClose": "关闭",
     "lightboxPrev": "上一张",
     "lightboxNext": "下一张",
@@ -310,6 +312,7 @@
       "listStyle": "文章列表样式",
       "listStyleList": "列表",
       "listStyleCard": "卡片",
+      "listStyleTimeline": "时间线",
       "details": "细节",
       "sidebarCounts": "侧栏显示未读计数",
       "cardThumbs": "文章卡片显示缩略图",

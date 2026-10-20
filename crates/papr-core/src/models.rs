@@ -120,6 +120,8 @@ pub struct ArticleSummary {
     pub author: Option<String>,
     pub snippet: Option<String>,
     pub image_url: Option<String>,
+    #[serde(default)]
+    pub image_urls: Vec<String>,
     pub url: Option<String>,
     pub published_at: Option<String>,
     pub is_read: bool,

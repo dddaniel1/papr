@@ -15,6 +15,9 @@ import { clampToViewport } from "../lib/viewport";
 import type { ArticleSummary, Feed } from "../types";
 import Icon from "./Icon";
 import ArticleImage from "./ArticleImage";
+import FeedAvatar from "./FeedAvatar";
+import TimelineMedia from "./TimelineMedia";
+import Lightbox from "./Lightbox";
 import ContextMenu, { type MenuEntry } from "./ContextMenu";
 
 const PAGE = 60;
@@ -81,6 +84,7 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
     article: ArticleSummary;
   } | null>(null);
   const [hover, setHover] = useState<Hover | null>(null);
+  const [gallery, setGallery] = useState<{ srcs: string[]; index: number; pageUrl: string | null } | null>(null);
   const hoverTimer = useRef<number | undefined>(undefined);
 
   // Offset-anchored, *bidirectional* paging. `pageParam` is the row offset of a
@@ -110,7 +114,7 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowEstimate =
-    viewMode === "card"
+    viewMode === "card" || viewMode === "timeline"
       ? 320
       : density === "compact"
         ? 78
@@ -189,6 +193,12 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
   // scrolls when the row isn't already fully visible, so *clicking* a visible
   // row never jolts the list — it just opens.
   const [reveal, setReveal] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    virt.measure();
+    if (selectedId != null) setReveal(selectedId);
+    // Re-measure cached rows when their presentation changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, density, i18n.language]);
   const totalSize = virt.getTotalSize();
   useEffect(() => {
     if (reveal == null) return;
@@ -298,7 +308,7 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
   useEffect(() => {
     window.clearTimeout(hoverTimer.current);
     setHover(null);
-  }, [query, unreadOnly, sortOldest]);
+  }, [query, unreadOnly, sortOldest, viewMode]);
 
   // Jump back to the top of the list whenever the sidebar selection changes.
   // The scroll container stays mounted across the query swap, so without this
@@ -606,11 +616,11 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
         )}
         {!browse.isLoading && items.length > 0 && (
           <div
-            role="listbox"
+            role={viewMode === "timeline" ? "list" : "listbox"}
             tabIndex={0}
             aria-labelledby="article-list-title"
             aria-activedescendant={
-              selectedId != null ? `option-article-${selectedId}` : undefined
+              viewMode !== "timeline" && selectedId != null ? `option-article-${selectedId}` : undefined
             }
             onKeyDown={onListKeyDown}
             style={{
@@ -654,25 +664,39 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
                   }}
                 >
                   <div
-                    className={`art ${viewMode === "card" ? "card" : ""} ${
+                    className={`art ${viewMode === "list" ? "" : viewMode} ${
                       selectedId === a.id ? "active" : ""
                     } ${a.isRead ? "read" : ""}`}
-                    role="option"
+                    role={viewMode === "timeline" ? "listitem" : "option"}
+                    tabIndex={viewMode === "timeline" ? 0 : undefined}
+                    aria-current={viewMode === "timeline" && selectedId === a.id ? "true" : undefined}
+                    onKeyDown={(e) => {
+                      if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+                        e.preventDefault();
+                        openArticle(a.id);
+                      }
+                    }}
                     id={`option-article-${a.id}`}
-                    aria-selected={selectedId === a.id}
+                    aria-selected={viewMode !== "timeline" ? selectedId === a.id : undefined}
                     onClick={() => openArticle(a.id)}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setMenu({ x: e.clientX, y: e.clientY, article: a });
                     }}
-                    onMouseEnter={(e) => onHover(a, e)}
+                    onMouseEnter={(e) => viewMode !== "timeline" && onHover(a, e)}
                     onMouseLeave={leaveHover}
                   >
                     {viewMode === "card" && showCardThumbs && (
                       <CardThumb article={a} />
                     )}
+                    {viewMode === "timeline" && (
+                      <div className="timeline-avatar" aria-hidden="true">
+                        <FeedAvatar title={a.feedTitle} faviconUrl={feed?.faviconUrl} seed={a.feedId}
+                          style={{ width: 32, height: 32, borderRadius: "50%", fontSize: 12 }} />
+                      </div>
+                    )}
                     <div className="art-head">
-                      {!a.isRead && <span className="art-dot" />}
+                      {viewMode !== "timeline" && !a.isRead && <span className="art-dot" />}
                       <span className="art-feed">{a.feedTitle}</span>
                       {feed && feed.sourceType !== "rss" && (
                         <span className="src-badge">{feed.sourceType}</span>
@@ -700,12 +724,12 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
                           />
                         </span>
                       )}
-                      {a.isStarred && (
+                      {viewMode !== "timeline" && a.isStarred && (
                         <span className="art-star">
                           <Icon name="star-fill" size={12} />
                         </span>
                       )}
-                      {a.readLater && !a.isStarred && (
+                      {viewMode !== "timeline" && a.readLater && !a.isStarred && (
                         <span className="art-star">
                           <Icon name="bookmark-fill" size={12} />
                         </span>
@@ -714,6 +738,9 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
                     <h3 className="art-title" title={rt.hasTranslation ? a.title : undefined}>
                       {rt.title}
                     </h3>
+                    {viewMode === "timeline" && a.author && (
+                      <div className="timeline-author">{a.author}</div>
+                    )}
                     {rt.snippet && (
                       <p
                         className="art-snippet"
@@ -721,6 +748,31 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
                       >
                         {rt.snippet}
                       </p>
+                    )}
+                    {viewMode === "timeline" && (
+                      <>
+                        <TimelineMedia article={a} onOpen={(srcs, index) => setGallery({ srcs, index, pageUrl: a.url })} />
+                        <div className="timeline-actions" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" className="tb-btn" aria-pressed={a.isStarred}
+                            aria-label={t(a.isStarred ? "articleList.menuUnstar" : "articleList.menuStar")}
+                            title={t(a.isStarred ? "articleList.menuUnstar" : "articleList.menuStar")}
+                            onClick={() => actions.setStarred(a.id, !a.isStarred)}>
+                            <Icon name={a.isStarred ? "star-fill" : "star"} size={15} />
+                          </button>
+                          <button type="button" className="tb-btn" aria-pressed={a.readLater}
+                            aria-label={t(a.readLater ? "articleList.menuRemoveReadLater" : "articleList.menuAddReadLater")}
+                            title={t(a.readLater ? "articleList.menuRemoveReadLater" : "articleList.menuAddReadLater")}
+                            onClick={() => actions.setReadLater(a.id, !a.readLater)}>
+                            <Icon name={a.readLater ? "bookmark-fill" : "bookmark"} size={15} />
+                          </button>
+                          <button type="button" className="tb-btn" aria-pressed={a.isRead}
+                            aria-label={t(a.isRead ? "articleList.menuMarkUnread" : "articleList.menuMarkRead")}
+                            title={t(a.isRead ? "articleList.menuMarkUnread" : "articleList.menuMarkRead")}
+                            onClick={() => actions.setRead(a.id, !a.isRead)}>
+                            <Icon name={a.isRead ? "circle" : "check"} size={15} />
+                          </button>
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>
@@ -737,6 +789,8 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
         {browse.isFetchingNextPage && <div className="list-page-status" role="status">{t("common.loading")}</div>}
         <div style={{ height: 60 }} />
       </div>
+
+      {gallery && <Lightbox {...gallery} onClose={() => setGallery(null)} />}
 
       {hover && <HoverPreview {...hover} feedTitle={hover.article.feedTitle} />}
 

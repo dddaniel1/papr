@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Icon from "./Icon";
+import { createPortal } from "react-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import { watchImage } from "../lib/imageLoading";
+import { reportError } from "../toast";
+import { useUi } from "../store";
 
 interface Props {
   /** The working (already-loaded, possibly proxied) src of every image in the
@@ -8,6 +14,7 @@ interface Props {
   srcs: string[];
   /** Index of the image the user clicked. */
   index: number;
+  pageUrl?: string | null;
   onClose: () => void;
 }
 
@@ -25,13 +32,30 @@ const clamp = (n: number, lo: number, hi: number) =>
  *  can be dragged to pan once zoomed in. Videos are intentionally excluded —
  *  sanitize forces `controls` on every `<video>`, so they already have native
  *  fullscreen. */
-export default function Lightbox({ srcs, index, onClose }: Props) {
+export default function Lightbox({ srcs, index, pageUrl, onClose }: Props) {
   const { t } = useTranslation();
   const [i, setI] = useState(index);
   const many = srcs.length > 1;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  useFocusTrap(rootRef);
+
+  useEffect(() => {
+    useUi.getState().setMenuOpen(true);
+    return () => useUi.getState().setMenuOpen(false);
+  }, []);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    delete img.dataset.paprSrc;
+    return watchImage(img, pageUrl, {
+      failed: t("reader.imageLoadFailed"),
+      retry: t("common.retry"),
+      open: t("reader.openOriginalImage"),
+    }, (url) => { openUrl(url).catch(reportError); });
+  }, [i, srcs, pageUrl, t]);
   // The current zoom/pan transform. Kept in a ref and applied straight to the
   // <img> style — wheel events fire far faster than React can re-render, so
   // state would lag the pointer. Only a change of shown image (below) resets it.
@@ -69,9 +93,11 @@ export default function Lightbox({ srcs, index, onClose }: Props) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!["Escape", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+      e.preventDefault();
       if (e.key === "Escape") onClose();
       else if (e.key === "ArrowLeft") prev();
-      else if (e.key === "ArrowRight") next();
+      else next();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -180,8 +206,11 @@ export default function Lightbox({ srcs, index, onClose }: Props) {
     stop(e);
   };
 
-  return (
+  return createPortal(
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("reader.imageViewer")}
       className="lightbox"
       ref={rootRef}
       onClick={() => {
@@ -217,6 +246,7 @@ export default function Lightbox({ srcs, index, onClose }: Props) {
       )}
 
       <img
+        key={`${i}:${srcs[i]}`}
         ref={imgRef}
         className="lightbox-img"
         src={srcs[i]}
@@ -254,6 +284,7 @@ export default function Lightbox({ srcs, index, onClose }: Props) {
       )}
 
       <div className="lightbox-hint">{t("reader.lightboxHint")}</div>
-    </div>
+    </div>,
+    document.body,
   );
 }

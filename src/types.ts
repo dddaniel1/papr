@@ -121,6 +121,7 @@ export interface ArticleSummary {
   author: string | null;
   snippet: string | null;
   imageUrl: string | null;
+  imageUrls: string[];
   url: string | null;
   publishedAt: string | null;
   isRead: boolean;

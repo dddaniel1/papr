@@ -304,6 +304,25 @@ pub fn first_image(html: &str) -> Option<String> {
     })
 }
 
+/// Gallery images from sanitized article HTML, in reading order without duplicates.
+pub fn image_urls(html: &str) -> Vec<String> {
+    let frag = Html::parse_fragment(html);
+    let mut seen = std::collections::HashSet::new();
+    frag.select(&IMG_SELECTOR)
+        .filter(|el| {
+            !["width", "height"].iter().any(|attr| {
+                el.value().attr(attr).and_then(|s| s.parse::<u32>().ok()).is_some_and(|n| n <= 2)
+            })
+        })
+        .filter_map(|el| {
+            let src = el.value().attr("src")?.trim();
+            let url = Url::parse(src).ok()?;
+            (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                && seen.insert(src.to_string())).then(|| src.to_string())
+        })
+        .collect()
+}
+
 /// HTML-escape a string for safe interpolation into element text or an
 /// attribute value. Escapes the five characters that can break out of either
 /// context (`& < > " '`).
@@ -443,6 +462,18 @@ mod tests {
     fn sanitize_drops_javascript_video_src() {
         let out = sanitize(r#"<video src="javascript:evil()"></video>"#, None);
         assert!(!out.contains("javascript:"), "javascript: src survived: {out}");
+    }
+
+    #[test]
+    fn gallery_images_keep_reading_order_and_skip_duplicates_and_pixels() {
+        assert_eq!(image_urls(r#"<img src="https://ex.com/a.jpg">
+            <img src="https://ex.com/a.jpg"><img src="javascript:alert(1)">
+            <img src="/relative.jpg"><img src="data:image/png;base64,AAAA">
+            <img width="1" src="https://ex.com/track.gif">
+            <img height="2" src="https://ex.com/pixel.gif">
+            <img src="https://ex.com/b.jpg?x=1&amp;y=2">"#),
+            vec!["https://ex.com/a.jpg", "https://ex.com/b.jpg?x=1&y=2"]);
+        assert!(image_urls("<p>No images</p>").is_empty());
     }
 
     // --- first_image: card-thumbnail fallback from body HTML. ---

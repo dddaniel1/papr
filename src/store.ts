@@ -38,7 +38,7 @@ export function resolveMode(mode: Mode): ResolvedMode {
   return mode;
 }
 export type Density = "compact" | "cozy" | "spacious";
-export type ViewMode = "list" | "card";
+export type ViewMode = "list" | "card" | "timeline";
 export type StartupView = "all" | "unread" | "starred" | "last";
 export type ReaderFont = "serif" | "sans" | "hyperlegible";
 
@@ -279,7 +279,7 @@ export const useUi = create<UiState>((set, get) => ({
   palette: ls.oneOf("palette", PALETTES, "paper"),
   mode: ls.oneOf("mode", MODES, "system"),
   density: ls.oneOf<Density>("density", ["compact", "cozy", "spacious"], "cozy"),
-  viewMode: ls.oneOf<ViewMode>("viewMode", ["list", "card"], "card"),
+  viewMode: ls.oneOf<ViewMode>("viewMode", ["list", "card", "timeline"], "card"),
   readerFont: ls.oneOf<ReaderFont>(
     "readerFont",
     ["serif", "sans", "hyperlegible"],
