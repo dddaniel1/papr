@@ -478,6 +478,12 @@
       "imagesHint": "Saves the available article body, highlights and notes. Extract full text first if only a summary is available. Images keep their original URLs; image files are not downloaded."
     },
     "sync": {
+      "serverLabel": "Server address",
+      "userLabel": "Username",
+      "passwordLabel": "Password",
+      "clientIdLabel": "Client ID",
+      "clientSecretLabel": "Client secret",
+      "tokenLabel": "API token",
       "greader": "GReader Sync",
       "provider": "Service",
       "providerFreshrss": "FreshRSS",

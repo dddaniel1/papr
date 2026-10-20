@@ -1,6 +1,6 @@
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { cloneElement, isValidElement, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getVersion } from "@tauri-apps/api/app";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -22,6 +22,7 @@ import ConfirmDialog from "./ConfirmDialog";
 import FeedAvatar from "./FeedAvatar";
 import ArchiveSettings from "./ArchiveSettings";
 import ServiceConnection from "./ServiceConnection";
+import Row from "./SettingsRow";
 
 interface Props {
   onClose: () => void;
@@ -185,33 +186,6 @@ export default function SettingsDialog({
 }
 
 /* ── row helpers ─────────────────────────────────────────── */
-function Row({
-  label,
-  desc,
-  children,
-}: {
-  label: string;
-  desc?: string;
-  children: React.ReactNode;
-}) {
-  // Name the row's control with the row label so screen readers don't just
-  // announce a bare "checkbox" / "slider" / "combobox". The control
-  // components forward the injected aria-label to their element.
-  const control = isValidElement(children)
-    ? cloneElement(children as React.ReactElement<{ "aria-label"?: string }>, {
-        "aria-label": label,
-      })
-    : children;
-  return (
-    <div className="settings-row">
-      <div className="settings-row-text">
-        <div className="settings-row-label">{label}</div>
-        {desc && <div className="settings-row-desc">{desc}</div>}
-      </div>
-      <div className="settings-row-control">{control}</div>
-    </div>
-  );
-}
 
 function Toggle({
   checked,
@@ -1542,13 +1516,12 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
     <>
       <div className="settings-group">
         <h3 className="settings-group-title">{t("settings.services.feedSync")}</h3>
-        <p className="service-group-hint">{t("settings.services.singleSync")}</p>
+        <p className="service-group-hint">{t("settings.services.syncDescription")} {t("settings.services.singleSync")}</p>
         {providers.map((service) => (
           <ServiceConnection
             key={service}
             service={service}
             name={providerLabel(service)}
-            description={t("settings.services.syncDescription")}
             connected={connected && connectedProvider === service}
             status={t(
               connected && connectedProvider === service
@@ -1560,7 +1533,7 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
             {connected && connectedProvider === service ? (
               <>
                 <p className="service-group-hint">{status.data?.url}</p>
-                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <div className="service-actions">
                   <button
                     className="s-btn primary"
                     onClick={syncNow}
@@ -1601,38 +1574,37 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
                       ? t("settings.sync.feedlyTokenHint")
                       : t("settings.sync.connectHint")}
                 </p>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div className="service-form">
                   {(service === "freshrss" || service === "miniflux") && (
                     <>
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        placeholder={t("settings.sync.serverPlaceholder")}
-                        {...NO_AUTOCORRECT}
-                        value={url}
-                        onChange={(e) => setUrl(e.target.value)}
-                      />
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        placeholder={t("settings.sync.userPlaceholder")}
-                        {...NO_AUTOCORRECT}
-                        value={user}
-                        onChange={(e) => setUser(e.target.value)}
-                      />
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        type="password"
-                        placeholder={
-                          service === "miniflux"
-                            ? t("settings.sync.appPassPlaceholder")
-                            : t("settings.sync.passPlaceholder")
-                        }
-                        {...NO_AUTOCORRECT}
-                        value={pass}
-                        onChange={(e) => setPass(e.target.value)}
-                      />
+                      <Row label={t("settings.sync.serverLabel")}>
+                        <input
+                          className="s-text-input"
+                          placeholder={t("settings.sync.serverPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={url}
+                          onChange={(e) => setUrl(e.target.value)}
+                        />
+                      </Row>
+                      <Row label={t("settings.sync.userLabel")}>
+                        <input
+                          className="s-text-input"
+                          placeholder={t("settings.sync.userPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={user}
+                          onChange={(e) => setUser(e.target.value)}
+                        />
+                      </Row>
+                      <Row label={t("settings.sync.passwordLabel")}>
+                        <input
+                          className="s-text-input"
+                          type="password"
+                          placeholder={t(service === "miniflux" ? "settings.sync.appPassPlaceholder" : "settings.sync.passPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={pass}
+                          onChange={(e) => setPass(e.target.value)}
+                        />
+                      </Row>
                       {service === "miniflux" && (
                         <p
                           style={{
@@ -1649,27 +1621,25 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
                   )}
                   {service === "inoreader" && (
                     <>
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        placeholder={t(
-                          "settings.sync.inoreaderClientIdPlaceholder",
-                        )}
-                        {...NO_AUTOCORRECT}
-                        value={clientId}
-                        onChange={(e) => setClientId(e.target.value)}
-                      />
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        type="password"
-                        placeholder={t(
-                          "settings.sync.inoreaderClientSecretPlaceholder",
-                        )}
-                        {...NO_AUTOCORRECT}
-                        value={clientSecret}
-                        onChange={(e) => setClientSecret(e.target.value)}
-                      />
+                      <Row label={t("settings.sync.clientIdLabel")}>
+                        <input
+                          className="s-text-input"
+                          placeholder={t("settings.sync.inoreaderClientIdPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={clientId}
+                          onChange={(e) => setClientId(e.target.value)}
+                        />
+                      </Row>
+                      <Row label={t("settings.sync.clientSecretLabel")}>
+                        <input
+                          className="s-text-input"
+                          type="password"
+                          placeholder={t("settings.sync.inoreaderClientSecretPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={clientSecret}
+                          onChange={(e) => setClientSecret(e.target.value)}
+                        />
+                      </Row>
                       <p
                         style={{
                           fontSize: 12,
@@ -1686,15 +1656,16 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
                   )}
                   {service === "feedly" && (
                     <>
-                      <input
-                        className="modal-input"
-                        style={{ margin: 0 }}
-                        type="password"
-                        placeholder={t("settings.sync.feedlyTokenPlaceholder")}
-                        {...NO_AUTOCORRECT}
-                        value={token}
-                        onChange={(e) => setToken(e.target.value)}
-                      />
+                      <Row label={t("settings.sync.tokenLabel")}>
+                        <input
+                          className="s-text-input"
+                          type="password"
+                          placeholder={t("settings.sync.feedlyTokenPlaceholder")}
+                          {...NO_AUTOCORRECT}
+                          value={token}
+                          onChange={(e) => setToken(e.target.value)}
+                        />
+                      </Row>
                       <p
                         style={{
                           fontSize: 12,
@@ -1707,7 +1678,7 @@ function SyncSection({ onToast }: { onToast: (m: string) => void }) {
                       </p>
                     </>
                   )}
-                  <div>
+                  <div className="service-actions">
                     <button
                       className="s-btn primary"
                       onClick={() => connect(service)}

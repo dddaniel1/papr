@@ -478,6 +478,12 @@
       "imagesHint": "保存当前已获取的文章正文、划线和批注；只有摘要时，请先提取全文。图片保留原始链接，不会下载图片文件。"
     },
     "sync": {
+      "serverLabel": "服务器地址",
+      "userLabel": "用户名",
+      "passwordLabel": "密码",
+      "clientIdLabel": "客户端 ID",
+      "clientSecretLabel": "客户端密钥",
+      "tokenLabel": "API 令牌",
       "greader": "GReader 同步",
       "provider": "服务",
       "providerFreshrss": "FreshRSS",

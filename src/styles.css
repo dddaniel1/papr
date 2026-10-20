@@ -922,7 +922,7 @@ button { font-family: inherit; }
 
 /* Social timeline: source avatar, expanded preview, media and quick actions. */
 .art.timeline {
-  padding-left: calc(var(--list-px) + 44px);
+  padding-left: calc(var(--list-px) + 38px);
 }
 .timeline-avatar {
   position: absolute;
@@ -930,7 +930,6 @@ button { font-family: inherit; }
   top: var(--row-py);
 }
 .art.timeline .art-head { gap: 6px; }
-.art.timeline .art-feed { font-weight: 650; color: var(--ink); }
 .art.timeline .art-title {
   display: block;
   overflow-wrap: anywhere;
@@ -939,7 +938,6 @@ button { font-family: inherit; }
 .art.timeline .art-snippet {
   display: block;
   overflow-wrap: anywhere;
-  line-height: 1.6;
 }
 .timeline-author {
   font-size: 11.5px;
@@ -950,11 +948,11 @@ button { font-family: inherit; }
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
-  gap: 3px;
+  gap: 2px;
   width: 100%;
   aspect-ratio: 1.38;
   border: 1px solid var(--hair);
-  border-radius: 10px;
+  border-radius: 8px;
   overflow: hidden;
   margin-top: 12px;
   background: var(--hair);
@@ -987,7 +985,7 @@ button { font-family: inherit; }
   place-items: center;
   background: rgba(0, 0, 0, 0.48);
   color: #fff;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 600;
 }
 .timeline-media .image-failure {
@@ -1000,10 +998,11 @@ button { font-family: inherit; }
 }
 .timeline-actions {
   display: flex;
-  justify-content: space-between;
-  margin: 10px -6px -6px;
-  max-width: 240px;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 -4px -6px;
 }
+.timeline-actions .tb-btn { width: 28px; height: 28px; }
 .timeline-actions .tb-btn[aria-pressed="true"] { color: var(--accent-ink); }
 .art.timeline:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
@@ -2226,21 +2225,70 @@ button { font-family: inherit; }
   color: #fff;
   flex-shrink: 0;
 }
-.service-group-hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 0 0 12px; }
+/* Service settings use the same row rhythm and controls as the other sections. */
+.service-group-hint, .service-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
 .service-connection { border-bottom: 1px solid var(--hair); }
-.service-summary { display: flex; align-items: center; gap: 12px; padding: 16px 0; cursor: pointer; list-style: none; border-radius: 6px; }
+.service-connection:last-child { border-bottom: 0; }
+.service-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 6px;
+}
 .service-summary::-webkit-details-marker { display: none; }
 .service-summary:hover { background: var(--hover); }
 .service-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.service-description { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
-.service-name { font-size: 14px; font-weight: 600; color: var(--ink); }
-.service-hint { font-size: 12px; line-height: 1.5; color: var(--muted); }
-.service-state { font-size: 11px; color: var(--muted); flex-shrink: 0; }
-.service-state.connected { color: var(--accent); }
+.service-icon {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.service-description { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.service-name { font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.service-hint { font-size: 12px; line-height: 1.45; color: var(--muted); }
+.service-state { font-size: 11.5px; color: var(--muted); flex-shrink: 0; }
+.service-state.connected { color: var(--success); }
 .service-chevron { color: var(--muted); flex-shrink: 0; }
 .service-connection[open] > .service-summary .service-chevron { transform: rotate(90deg); }
-.service-configuration { padding: 4px 0 20px 34px; }
-@media (max-width: 600px) { .service-configuration { padding-left: 0; } .service-summary { gap: 8px; } }
+.service-configuration { padding: 0 12px 16px 52px; }
+.service-form .settings-row { align-items: flex-start; }
+.service-form .settings-row-text { padding-top: 4px; }
+.service-form .settings-row-control { min-width: 0; }
+.service-form .s-text-input { max-width: 100%; }
+.service-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.service-notes { margin-top: 16px; }
+.service-feedback { font-size: 12px; line-height: 1.45; margin: 12px 0 0; overflow-wrap: anywhere; }
+.service-feedback[role="alert"] { color: var(--danger); }
+.service-feedback[role="status"] { color: var(--success); }
+@media (max-width: 760px) {
+  .service-configuration { padding: 0 12px 16px; }
+  .service-form .settings-row { flex-direction: column; gap: 8px; }
+  .service-form .settings-row-text { flex-basis: auto; padding-top: 0; }
+  .service-form .settings-row-control { width: 100%; }
+  .service-form .s-text-input { width: 100%; }
+}
+@media (max-width: 600px) {
+  .service-summary { gap: 8px; flex-wrap: wrap; }
+  .service-description { flex-basis: calc(100% - 62px); }
+  .service-state { margin-left: 36px; }
+  .service-chevron { margin-left: auto; }
+}
 .s-service .logo.service-logo { color: var(--ink); background: var(--hover); }
 .s-service .info { flex: 1; min-width: 0; }
 .s-service .info .title { font-size: 14px; font-weight: 600; color: var(--ink); }

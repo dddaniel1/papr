@@ -692,7 +692,7 @@ export default function ArticleList({ onToast, onAddFeed }: Props) {
                     {viewMode === "timeline" && (
                       <div className="timeline-avatar" aria-hidden="true">
                         <FeedAvatar title={a.feedTitle} faviconUrl={feed?.faviconUrl} seed={a.feedId}
-                          style={{ width: 32, height: 32, borderRadius: "50%", fontSize: 12 }} />
+                          style={{ width: 28, height: 28, borderRadius: 6, fontSize: 11 }} />
                       </div>
                     )}
                     <div className="art-head">

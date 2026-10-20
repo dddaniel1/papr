@@ -5,8 +5,7 @@ import * as api from "../api";
 import { NO_AUTOCORRECT } from "../lib/inputProps";
 import { errorText } from "../lib/errors";
 import ServiceConnection from "./ServiceConnection";
-
-const hintStyle = { fontSize: 12, color: "var(--muted)", lineHeight: 1.5 };
+import Row from "./SettingsRow";
 
 export default function ArchiveSettings() {
   const { t } = useTranslation();
@@ -83,12 +82,12 @@ export default function ArchiveSettings() {
   };
 
   if (settings.isPending) {
-    return <p className="modal-hint" style={hintStyle} role="status">{t("settings.archive.loading")}</p>;
+    return <p className="service-note" role="status">{t("settings.archive.loading")}</p>;
   }
   if (!settings.data) {
     return (
       <div className="settings-group">
-        <p className="modal-hint" style={hintStyle} role="alert">{t("settings.archive.loadFailed")}</p>
+        <p className="service-note" role="alert">{t("settings.archive.loadFailed")}</p>
         <button className="s-btn" onClick={() => void settings.refetch()} disabled={settings.isFetching}>
           {settings.isFetching ? t("common.loading") : t("common.retry")}
         </button>
@@ -97,52 +96,46 @@ export default function ArchiveSettings() {
   }
 
   const feedbackFor = (service: api.ArchiveService) => feedback?.service === service && (
-    <p className="modal-hint" style={hintStyle} role={feedback.error ? "alert" : "status"}>
+    <p className="service-feedback" role={feedback.error ? "alert" : "status"}>
       {t(`settings.archive.${feedback.key}`)}
       {feedback.detail && <> {feedback.detail}</>}
     </p>
   );
-  const formStyle = { display: "flex", flexDirection: "column", gap: 8 } as const;
-  const inputStyle = { margin: 0 };
 
   return (
     <div className="settings-group">
       <h3 className="settings-group-title">{t("settings.services.archiving")}</h3>
       <ServiceConnection service="obsidian" name="Obsidian" description={t("settings.archive.obsidianHint")} connected={settings.data.obsidian.configured} status={t(settings.data.obsidian.configured ? "settings.archive.configured" : "settings.services.notConfigured")}>
-        <form style={formStyle} onSubmit={(e) => { e.preventDefault(); void save("obsidian"); }}>
-          <label htmlFor="archive-vault-path" className="settings-row-label">{t("settings.archive.vaultPath")}</label>
+        <form className="service-form" onSubmit={(e) => { e.preventDefault(); void save("obsidian"); }}>
+          <Row label={t("settings.archive.vaultPath")} desc={t("settings.archive.vaultPathHint")}>
           <input
             id="archive-vault-path"
-            className="modal-input"
-            style={inputStyle}
+            className="s-text-input"
             {...NO_AUTOCORRECT}
             value={vaultPath}
             onChange={(e) => setVaultPath(e.target.value)}
             placeholder={t("settings.archive.vaultPathPlaceholder")}
-            aria-describedby="archive-vault-hint"
             disabled={busy !== null}
             required
           />
-          <div>
+          </Row>
+          <div className="service-actions">
             <button className="s-btn" type="button" onClick={() => void chooseVault()} disabled={busy !== null}>
               {t("settings.archive.chooseVault")}
             </button>
           </div>
-          <p id="archive-vault-hint" className="modal-hint" style={{ ...hintStyle, margin: 0 }}>{t("settings.archive.vaultPathHint")}</p>
-          <label htmlFor="archive-folder" className="settings-row-label">{t("settings.archive.folder")}</label>
+          <Row label={t("settings.archive.folder")} desc={t("settings.archive.folderHint")}>
           <input
             id="archive-folder"
-            className="modal-input"
-            style={inputStyle}
+            className="s-text-input"
             {...NO_AUTOCORRECT}
             value={folder}
             onChange={(e) => setFolder(e.target.value)}
             placeholder={t("settings.archive.folderPlaceholder")}
-            aria-describedby="archive-folder-hint"
             disabled={busy !== null}
           />
-          <p id="archive-folder-hint" className="modal-hint" style={{ ...hintStyle, margin: 0 }}>{t("settings.archive.folderHint")}</p>
-          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+          </Row>
+          <div className="service-actions">
             <button className="s-btn primary" type="submit" disabled={busy !== null || !vaultPath.trim()}>
               {busy === "obsidian" ? t("settings.archive.working") : t("settings.archive.saveVerify")}
             </button>
@@ -151,7 +144,7 @@ export default function ArchiveSettings() {
                 <button className="s-btn" type="button" onClick={() => void save("obsidian", true)} disabled={busy !== null}>
                   {t("settings.archive.disconnect")}
                 </button>
-                <span className="modal-hint" style={hintStyle}>{t("settings.archive.configured")}</span>
+                <span className="service-note">{t("settings.archive.configured")}</span>
               </>
             )}
           </div>
@@ -160,28 +153,25 @@ export default function ArchiveSettings() {
       </ServiceConnection>
 
       <ServiceConnection service="notion" name="Notion" description={t("settings.archive.notionHint")} connected={settings.data.notion.configured} status={t(settings.data.notion.configured ? "settings.archive.configured" : "settings.services.notConfigured")}>
-        <form style={formStyle} onSubmit={(e) => { e.preventDefault(); void save("notion"); }}>
-          <label htmlFor="archive-notion-token" className="settings-row-label">{t("settings.archive.token")}</label>
+        <form className="service-form" onSubmit={(e) => { e.preventDefault(); void save("notion"); }}>
+          <Row label={t("settings.archive.token")} desc={t("settings.archive.tokenHint")}>
           <input
             id="archive-notion-token"
-            className="modal-input"
-            style={inputStyle}
+            className="s-text-input"
             type="password"
             {...NO_AUTOCORRECT}
             autoComplete="new-password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
             placeholder={t(settings.data.notion.tokenConfigured ? "settings.archive.tokenKeepPlaceholder" : "settings.archive.tokenPlaceholder")}
-            aria-describedby="archive-token-hint"
             disabled={busy !== null}
             required={!settings.data.notion.tokenConfigured}
           />
-          <p id="archive-token-hint" className="modal-hint" style={{ ...hintStyle, margin: 0 }}>{t("settings.archive.tokenHint")}</p>
-          <label htmlFor="archive-target-type" className="settings-row-label">{t("settings.archive.targetType")}</label>
+          </Row>
+          <Row label={t("settings.archive.targetType")}>
           <select
             id="archive-target-type"
-            className="modal-input"
-            style={inputStyle}
+            className="s-select"
             value={targetType}
             onChange={(e) => setTargetType(e.target.value as "page" | "database")}
             disabled={busy !== null}
@@ -189,21 +179,20 @@ export default function ArchiveSettings() {
             <option value="page">{t("settings.archive.page")}</option>
             <option value="database">{t("settings.archive.database")}</option>
           </select>
-          <label htmlFor="archive-target-id" className="settings-row-label">{t("settings.archive.targetId")}</label>
+          </Row>
+          <Row label={t("settings.archive.targetId")} desc={t("settings.archive.targetHint")}>
           <input
             id="archive-target-id"
-            className="modal-input"
-            style={inputStyle}
+            className="s-text-input"
             {...NO_AUTOCORRECT}
             value={targetId}
             onChange={(e) => setTargetId(e.target.value)}
             placeholder={t("settings.archive.targetIdPlaceholder")}
-            aria-describedby="archive-target-hint"
             disabled={busy !== null}
             required
           />
-          <p id="archive-target-hint" className="modal-hint" style={{ ...hintStyle, margin: 0 }}>{t("settings.archive.targetHint")}</p>
-          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+          </Row>
+          <div className="service-actions">
             <button
               className="s-btn primary"
               type="submit"
@@ -216,16 +205,16 @@ export default function ArchiveSettings() {
                 <button className="s-btn" type="button" onClick={() => void save("notion", true)} disabled={busy !== null}>
                   {t("settings.archive.disconnect")}
                 </button>
-                <span className="modal-hint" style={hintStyle}>{t("settings.archive.configured")}</span>
+                <span className="service-note">{t("settings.archive.configured")}</span>
               </>
             )}
           </div>
           {feedbackFor("notion")}
         </form>
       </ServiceConnection>
-      <div>
-        <p className="modal-hint" style={{ ...hintStyle, marginTop: 14 }}>{t("settings.archive.overwriteHint")}</p>
-        <p className="modal-hint" style={hintStyle}>{t("settings.archive.imagesHint")}</p>
+      <div className="service-notes">
+        <p className="service-note">{t("settings.archive.overwriteHint")}</p>
+        <p className="service-note">{t("settings.archive.imagesHint")}</p>
       </div>
     </div>
   );

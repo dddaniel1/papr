@@ -403,6 +403,12 @@
       }
     },
     "sync": {
+      "serverLabel": "サーバーアドレス",
+      "userLabel": "ユーザー名",
+      "passwordLabel": "パスワード",
+      "clientIdLabel": "クライアント ID",
+      "clientSecretLabel": "クライアントシークレット",
+      "tokenLabel": "API トークン",
       "greader": "GReader 同期",
       "provider": "サービス",
       "providerFreshrss": "FreshRSS",

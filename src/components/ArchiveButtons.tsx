@@ -37,14 +37,14 @@ function ArchiveButton({ articleId, service }: { articleId: number; service: api
   return (
     <button
       type="button"
-      className={`tb-btn ${save.isPending ? "spinning" : ""}`}
+      className="tb-btn"
       title={label}
       aria-label={label}
       aria-busy={save.isPending}
       disabled={save.isPending}
       onClick={() => save.mutate()}
     >
-      <Icon name={save.isPending ? "refresh" : service} size={16} />
+      <Icon name={save.isPending ? "refresh" : service} size={16} className={save.isPending ? "spinning" : undefined} />
     </button>
   );
 }
